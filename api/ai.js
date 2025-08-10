@@ -1,8 +1,11 @@
-// /api/ai.js  — Edge Runtime (one file, one default export)
-export const config = { runtime: 'edge' }; // tells Vercel to run as Edge
+// api/ai.js — Edge Function (no Node runtime config required)
+export const config = { runtime: 'edge' };
 
+// CORS
 const ALLOWED_ORIGINS = (process.env.CORS_ORIGINS || '')
-  .split(',').map(s => s.trim()).filter(Boolean);
+  .split(',')
+  .map(s => s.trim())
+  .filter(Boolean);
 
 function corsHeaders(origin) {
   if (!origin || ALLOWED_ORIGINS.length === 0 || ALLOWED_ORIGINS.includes(origin)) {
@@ -68,45 +71,49 @@ export default async function handler(req) {
   const origin = req.headers.get('origin') || undefined;
   const headers = corsHeaders(origin);
 
-  // Preflight
-  if (req.method === 'OPTIONS') return new Response(null, { status: 204, headers });
-  if (req.method !== 'POST') return Response.json({ error: 'Only POST supported' }, { status: 405, headers });
+  if (req.method === 'OPTIONS') {
+    return new Response(null, { status: 204, headers });
+  }
+  if (req.method !== 'POST') {
+    return new Response(JSON.stringify({ error: 'Only POST supported' }), { status: 405, headers });
+  }
 
   try {
-    const { mode, question, context, imageUrl } = await req.json().catch(()=> ({}));
+    const { mode, question, context, imageUrl } = await req.json().catch(() => ({}));
 
     const hasPPLX = !!process.env.PPLX_API_KEY;
     const hasOAI  = !!process.env.OPENAI_API_KEY;
     if (!hasPPLX && !hasOAI) {
-      return Response.json({ error: 'No provider keys configured.' }, { status: 500, headers });
+      return new Response(JSON.stringify({ error: 'No provider keys configured.' }), { status: 500, headers });
     }
 
     if (mode === 'ask') {
-      if (!question || !context) return Response.json({ error: 'Missing question/context' }, { status: 400, headers });
-
-      // Try Perplexity → fallback OpenAI
+      if (!question || !context) {
+        return new Response(JSON.stringify({ error: 'Missing question/context' }), { status: 400, headers });
+      }
+      // Try Perplexity → fallback to OpenAI
       try {
         if (hasPPLX) {
-          const ac = new AbortController(); const to = setTimeout(()=>ac.abort(), 30000);
-          const answer = await askPerplexity({ question, context, signal: ac.signal }); clearTimeout(to);
-          return Response.json({ answer, provider: 'perplexity' }, { headers });
+          const ac = new AbortController();
+          const to = setTimeout(() => ac.abort(), 30000);
+          const answer = await askPerplexity({ question, context, signal: ac.signal });
+          clearTimeout(to);
+          return new Response(JSON.stringify({ answer, provider: 'perplexity' }), { headers });
         }
       } catch {}
-      try {
-        if (hasOAI) {
-          const ac = new AbortController(); const to = setTimeout(()=>ac.abort(), 30000);
-          const answer = await askOpenAI({ question, context, signal: ac.signal }); clearTimeout(to);
-          return Response.json({ answer, provider: 'openai' }, { headers });
-        }
-      } catch {
-        return Response.json({ error: 'All providers failed.' }, { status: 502, headers });
+      if (hasOAI) {
+        const ac = new AbortController();
+        const to = setTimeout(() => ac.abort(), 30000);
+        const answer = await askOpenAI({ question, context, signal: ac.signal });
+        clearTimeout(to);
+        return new Response(JSON.stringify({ answer, provider: 'openai' }), { headers });
       }
-      return Response.json({ error: 'No provider available.' }, { status: 500, headers });
+      return new Response(JSON.stringify({ error: 'All providers failed.' }), { status: 502, headers });
     }
 
     if (mode === 'caption') {
-      if (!imageUrl) return Response.json({ error: 'Missing imageUrl' }, { status: 400, headers });
-      if (!hasOAI)   return Response.json({ error: 'OPENAI_API_KEY required for captions' }, { status: 500, headers });
+      if (!imageUrl)    return new Response(JSON.stringify({ error: 'Missing imageUrl' }), { status: 400, headers });
+      if (!hasOAI)      return new Response(JSON.stringify({ error: 'OPENAI_API_KEY required for captions' }), { status: 500, headers });
 
       // Caption
       const capReq = await fetch('https://api.openai.com/v1/chat/completions', {
@@ -126,7 +133,8 @@ export default async function handler(req) {
         }),
       });
       if (!capReq.ok) {
-        return Response.json({ error: `Vision HTTP ${capReq.status}: ${await capReq.text().catch(()=> '')}` }, { status: 502, headers });
+        return new Response(JSON.stringify({ error: `Vision HTTP ${capReq.status}: ${await capReq.text().catch(()=> '')}` }),
+                            { status: 502, headers });
       }
       const capJson  = await capReq.json();
       const caption  = (capJson?.choices?.[0]?.message?.content || '').trim();
@@ -146,18 +154,19 @@ export default async function handler(req) {
         }),
       });
       if (!tagReq.ok) {
-        return Response.json({ error: `Tags HTTP ${tagReq.status}: ${await tagReq.text().catch(()=> '')}` }, { status: 502, headers });
+        return new Response(JSON.stringify({ error: `Tags HTTP ${tagReq.status}: ${await tagReq.text().catch(()=> '')}` }),
+                            { status: 502, headers });
       }
       const tagJson = await tagReq.json();
-      const tagLine = (tagJson?.choices?.[0]?.message?.content ?? '').trim();
-      const tags    = tagLine.split(',').map(s => s.trim()).filter(Boolean).slice(0, 8);
+      const tags = (tagJson?.choices?.[0]?.message?.content || '')
+        .split(',').map(s => s.trim()).filter(Boolean).slice(0, 8);
 
-      return Response.json({ caption, tags }, { headers });
+      return new Response(JSON.stringify({ caption, tags }), { headers });
     }
 
-    return Response.json({ error: 'Invalid mode. Use "ask" or "caption".' }, { status: 400, headers });
+    return new Response(JSON.stringify({ error: 'Invalid mode. Use "ask" or "caption".' }), { status: 400, headers });
   } catch (err) {
     const msg = err?.name === 'AbortError' ? 'Upstream request timed out' : (err?.message || 'Server error');
-    return Response.json({ error: msg }, { status: 500, headers });
+    return new Response(JSON.stringify({ error: msg }), { status: 500, headers });
   }
 }
