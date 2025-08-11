@@ -265,3 +265,22 @@ export default async function handler(req) {
     return new Response(JSON.stringify({ error: msg }), { status: 500, headers });
   }
 }
+
+
+
+{
+  "name": "album-ai-backend",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=18.18.0"
+  },
+  "scripts": {
+    "build": "echo \"Nothing to build (Edge Function)\"",
+    "dev": "vercel dev",
+    "start": "vercel dev"
+  },
+  "dependencies": {}
+}
+
