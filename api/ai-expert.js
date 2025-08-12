@@ -15,9 +15,14 @@ function corsHeaders(origin) {
       'Access-Control-Allow-Headers': 'Content-Type, Authorization',
       'Access-Control-Allow-Methods': 'POST, OPTIONS',
       'Cache-Control': 'no-store',
+      'Content-Type': 'application/json; charset=utf-8',
     };
   }
-  return { 'Cache-Control': 'no-store' };
+  // Not allowed → no ACAO header on purpose
+  return {
+    'Cache-Control': 'no-store',
+    'Content-Type': 'application/json; charset=utf-8',
+  };
 }
 
 function withTimeout(ms = 30_000) {
@@ -234,43 +239,50 @@ function scoreDoc(qTokens, doc) {
     if (text.includes(` ${t} `) || text.startsWith(t + ' ') || text.endsWith(' ' + t)) score += 3;
     else if (text.includes(t)) score += 1;
   }
-  // slight boost if topic keyword appears
   if (text.includes('aavss') || text.includes('autonomous vehicle safety')) score += 1;
   if (text.includes('dataset') || text.includes('sri lanka')) score += 1;
   return score;
 }
 
-function topK(q, k = 8) {
+function detectTopic(q) {
+  const n = normalize(q);
+  if (/(^|\s)(aavss|fusion|radar|lidar|lane|tracking|jetson|safety)(\s|$)/.test(n)) return 'aavss';
+  if (/(^|\s)(dataset|data set|sri lanka|annotation|label|split|download|license)(\s|$)/.test(n)) return 'sldataset';
+  return 'all';
+}
+
+// NEW: topic-aware topK to prevent mixing
+function topK(q, k = 8, topic = 'all') {
   const qTokens = normalize(q).split(' ');
-  const ranked = KB.docs
+  const pool = KB.docs.filter(d => {
+    if (topic === 'aavss')     return d.topic === 'aavss' || d.topic === 'all';
+    if (topic === 'sldataset') return d.topic === 'sldataset' || d.topic === 'all';
+    return true;
+  });
+  const ranked = pool
     .map(d => ({ d, s: scoreDoc(qTokens, d) }))
     .filter(x => x.s > 0)
     .sort((a, b) => b.s - a.s)
     .slice(0, k)
     .map(x => x.d);
-  // If nothing matched, fall back to overviews
+
   if (ranked.length === 0) {
+    // Fallback to the overview for the selected topic
+    if (topic === 'aavss')     return KB.docs.filter(d => d.id === 'aavss-overview');
+    if (topic === 'sldataset') return KB.docs.filter(d => d.id === 'sld-overview');
     return KB.docs.filter(d => d.id === 'aavss-overview' || d.id === 'sld-overview');
   }
   return ranked;
 }
 
-function detectTopic(q) {
-  const n = normalize(q);
-  if (/(aavss|fusion|radar|lidar|lane|tracking|jetson|safety)/.test(n)) return 'aavss';
-  if (/(dataset|data set|sri lanka|annotation|label|split|download|license)/.test(n)) return 'sldataset';
-  return 'all';
-}
-
-function buildContext(q) {
-  const k = topK(q);
+function buildContext(q, topic = 'all') {
+  const k = topK(q, 8, topic);
   const ctx = k.map((d, i) => `#${i + 1} ${d.title}\n${d.text}`).join('\n\n');
   const ids = k.map(d => d.id);
   return { ctx, ids };
 }
 
 /* ───────────────────── Providers (Text) ───────────────────── */
-// 1) Groq (OpenAI-compatible)
 async function askGroq({ system, user, signal }) {
   const key = process.env.GROQ_API_KEY;
   if (!key) throw new Error('GROQ_API_KEY not set');
@@ -293,7 +305,6 @@ async function askGroq({ system, user, signal }) {
   return (j?.choices?.[0]?.message?.content ?? '').trim();
 }
 
-// 2) DeepInfra (OpenAI-compatible)
 async function askDeepInfra({ system, user, signal }) {
   const key = process.env.DEEPINFRA_API_KEY;
   if (!key) throw new Error('DEEPINFRA_API_KEY not set');
@@ -316,7 +327,6 @@ async function askDeepInfra({ system, user, signal }) {
   return (j?.choices?.[0]?.message?.content ?? '').trim();
 }
 
-// 3) Gemini (text)
 async function askGemini({ system, user, signal }) {
   const key = process.env.GEMINI_API_KEY;
   if (!key) throw new Error('GEMINI_API_KEY not set');
@@ -388,15 +398,14 @@ export default async function handler(req) {
       return new Response(JSON.stringify({ error: 'Missing question' }), { status: 400, headers });
     }
 
-    // Retrieval
+    // Topic detection and topic-aware retrieval (prevents AAVSS/Dataset mixing)
     const topic = detectTopic(question);
-    const { ctx, ids } = buildContext(question);
+    const { ctx, ids } = buildContext(question, topic);
 
     const sys = systemPrompt(topic);
     const usr = userPrompt(question, ctx);
 
     // Provider fallback: Groq → DeepInfra → Gemini
-    // Each wrapped with its own timeout
     let answer = '';
     let provider = '';
     const providers = [
@@ -417,7 +426,7 @@ export default async function handler(req) {
       }
     }
 
-    // Final fallback: return stitched KB if all providers fail
+    // Final fallback: stitched KB if all providers fail
     if (!answer) {
       const stitched = ids
         .map((id, i) => {
@@ -434,7 +443,7 @@ export default async function handler(req) {
       provider = 'kb-fallback';
     }
 
-    // Gentle polish (very light, no hallucination)
+    // Gentle polish (no hallucination)
     answer = answer.trim().replace(/\n{3,}/g, '\n\n');
 
     return new Response(JSON.stringify({
