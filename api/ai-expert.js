@@ -251,7 +251,7 @@ function detectTopic(q) {
   return 'all';
 }
 
-// NEW: topic-aware topK to prevent mixing
+// Topic-aware topK to prevent mixing
 function topK(q, k = 8, topic = 'all') {
   const qTokens = normalize(q).split(' ');
   const pool = KB.docs.filter(d => {
@@ -267,7 +267,6 @@ function topK(q, k = 8, topic = 'all') {
     .map(x => x.d);
 
   if (ranked.length === 0) {
-    // Fallback to the overview for the selected topic
     if (topic === 'aavss')     return KB.docs.filter(d => d.id === 'aavss-overview');
     if (topic === 'sldataset') return KB.docs.filter(d => d.id === 'sld-overview');
     return KB.docs.filter(d => d.id === 'aavss-overview' || d.id === 'sld-overview');
@@ -398,8 +397,12 @@ export default async function handler(req) {
       return new Response(JSON.stringify({ error: 'Missing question' }), { status: 400, headers });
     }
 
+    // ── NEW: accept a client hint to pin the topic (from app.js)
+    const userHint = String(body?.topicHint || '').trim().toLowerCase();
+    const validHint = (userHint === 'aavss' || userHint === 'sldataset') ? userHint : '';
+
     // Topic detection and topic-aware retrieval (prevents AAVSS/Dataset mixing)
-    const topic = detectTopic(question);
+    const topic = validHint || detectTopic(question);
     const { ctx, ids } = buildContext(question, topic);
 
     const sys = systemPrompt(topic);
