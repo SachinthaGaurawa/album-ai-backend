@@ -1,7 +1,7 @@
 {
   "version": 2,
   "routes": [
-    { "src": "^/api/ai$",          "dest": "/api/ai.js" },
-    { "src": "^/api/ingest-pdf$",  "dest": "/api/ingest-pdf.js" }
+    { "src": "/api/ai",          "dest": "/api/ai.js" },
+    { "src": "/api/ingest-pdf",  "dest": "/api/ingest-pdf.js" }
   ]
 }
