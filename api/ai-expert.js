@@ -297,3 +297,328 @@ export default async function handler(req) {
     return new Response(JSON.stringify({ error: msg }), { status: 500, headers });
   }
 }
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+/* ==========================================================
+   PRO AI CHAT DOCK  —  powerful, friendly, theme-aware
+   ========================================================== */
+(function ProAiChatDock(){
+  // ------- tiny helpers -------
+  const $ = (s,p=document)=>p.querySelector(s);
+  const md = (t)=> (typeof mdToHtml === 'function' ? mdToHtml(t) : (t||''));
+
+  // ------- CSS (injected once) -------
+  const css = `
+  #aiFab{
+    position: fixed; right: 18px; bottom: 18px; z-index: 9999;
+    width: 54px; height: 54px; border-radius: 999px; border:1px solid rgba(150,190,255,.25);
+    display:flex; align-items:center; justify-content:center; cursor:pointer;
+    font-size:22px; user-select:none; backdrop-filter: blur(6px);
+    transition: transform .12s ease, box-shadow .2s ease, background .2s ease;
+    box-shadow: 0 12px 26px rgba(0,0,0,.35), inset 0 0 0 1px rgba(255,255,255,.06);
+    background: linear-gradient(180deg, #0e1420, #0b111a);
+    color:#E7F0FF;
+  }
+  body.is-light #aiFab{
+    background: linear-gradient(180deg, #F3F7FF, #EDF3FF);
+    color:#1F3B63; border-color:#86aef2;
+    box-shadow: 0 10px 22px rgba(0,0,0,.15), inset 0 0 0 1px rgba(255,255,255,.85);
+  }
+  #aiFab:hover{ transform: translateY(-2px); }
+
+  #aiDock{
+    position: fixed; right: 16px; bottom: 84px; z-index: 9999;
+    width: min(720px, 92vw); max-height: min(74vh, 760px);
+    border-radius: 16px; overflow: hidden; display:none; flex-direction: column;
+    border:1px solid rgba(150,190,255,.25);
+    background: rgba(12,16,24,.96);
+    box-shadow: 0 18px 38px rgba(0,0,0,.45), inset 0 0 0 1px rgba(255,255,255,.06);
+    backdrop-filter: blur(10px);
+  }
+  body.is-light #aiDock{
+    background: rgba(250,252,255,.96);
+    border-color:#86aef2; box-shadow: 0 12px 28px rgba(0,0,0,.12), inset 0 0 0 1px rgba(255,255,255,.85);
+  }
+
+  .ai-head{
+    display:flex; align-items:center; gap:.75rem; padding:12px 14px;
+    border-bottom:1px solid rgba(150,190,255,.18);
+  }
+  .ai-head .title{
+    font-family:'Orbitron',system-ui; font-weight:700; letter-spacing:.02em;
+    display:flex; align-items:center; gap:.5rem;
+  }
+  .ai-head .title .dot{ width:8px; height:8px; border-radius:999px; background:#8dd17a; box-shadow:0 0 8px #8dd17a; }
+  .ai-head .actions{ margin-left:auto; display:flex; gap:.4rem; }
+  .ai-btn{
+    border:1px solid rgba(150,190,255,.22); background:transparent; color:inherit;
+    padding:6px 10px; border-radius:10px; font-size:.9rem; cursor:pointer;
+  }
+
+  .ai-body{ display:flex; flex-direction:column; gap:10px; padding:12px 14px; overflow:auto; min-height:200px; }
+  .ai-msg{ max-width:88%; border:1px solid rgba(255,255,255,.08); border-radius:14px; padding:10px 12px; line-height:1.5; }
+  .ai-msg.user{ margin-left:auto; background:rgba(120,170,255,.12); }
+  .ai-msg.bot { background:#0e1a24; color:#e9f2f9; }
+  body.is-light .ai-msg.bot { background:#f0f5ff; color:#1b2b45; border-color:rgba(0,0,0,.06); }
+  .ai-msg .imgrow{ display:grid; grid-template-columns: repeat(auto-fill, minmax(120px,1fr)); gap:8px; margin-top:8px; }
+  .ai-msg .imgrow img{ width:100%; height:100px; object-fit:cover; border-radius:10px; }
+
+  .ai-suggest{ display:flex; flex-wrap:wrap; gap:8px; padding:0 14px 10px; }
+  .ai-chip{ border:1px dashed rgba(150,190,255,.35); padding:6px 10px; border-radius:999px; cursor:pointer; }
+  body.is-light .ai-chip{ border-color:#86aef2; }
+
+  .ai-input{
+    display:grid; grid-template-columns: 1fr auto auto; gap:8px; padding:12px 14px; border-top:1px solid rgba(150,190,255,.18);
+  }
+  .ai-input input{
+    width:100%; border-radius:12px; border:1px solid rgba(150,190,255,.22);
+    background: transparent; color: inherit; padding:10px 12px; outline:none;
+  }
+  .ai-send, .ai-mic{
+    border:1px solid rgba(150,190,255,.22); background:transparent; color:inherit; padding:8px 12px; border-radius:12px; cursor:pointer;
+  }
+  .ai-mic.rec{ box-shadow:0 0 0 3px rgba(255,0,0,.25) inset; }
+  @media (max-width: 520px){
+    #aiDock{ right:10px; left:10px; width:auto; bottom:76px; }
+  }`;
+  const style = document.createElement('style'); style.id = 'pro-ai-dock-css'; style.textContent = css;
+  document.head.appendChild(style);
+
+  // ------- DOM (built once) -------
+  const fab = document.createElement('button');
+  fab.id = 'aiFab';
+  fab.type = 'button';
+  fab.title = 'Open assistant';
+  fab.innerHTML = '🤖';
+  document.body.appendChild(fab);
+
+  const dock = document.createElement('section'); dock.id = 'aiDock'; dock.setAttribute('aria-live','polite');
+  dock.innerHTML = `
+    <div class="ai-head">
+      <div class="title"><span class="dot"></span><span>Assistant</span></div>
+      <div class="actions">
+        <button class="ai-btn" id="aiClear">Clear</button>
+        <button class="ai-btn" id="aiMin">Minimize</button>
+      </div>
+    </div>
+    <div class="ai-body" id="aiBody"></div>
+    <div class="ai-suggest" id="aiSuggest"></div>
+    <div class="ai-input">
+      <input id="aiInput" type="text" placeholder="Ask anything… (e.g., What is AAVSS?)">
+      <button class="ai-mic" id="aiMic" title="Voice"></button>
+      <button class="ai-send" id="aiSend">Send</button>
+    </div>`;
+  document.body.appendChild(dock);
+
+  const bodyEl = $('#aiBody', dock);
+  const sugEl  = $('#aiSuggest', dock);
+  const inp    = $('#aiInput', dock);
+  const micBtn = $('#aiMic', dock);
+  const send   = $('#aiSend', dock);
+  const clearB = $('#aiClear', dock);
+  const minB   = $('#aiMin', dock);
+
+  // ------- simple session memory -------
+  const MEMKEY = 'aiDockHistory';
+  function loadHistory(){ try{ return JSON.parse(sessionStorage.getItem(MEMKEY)||'[]'); }catch{ return []; } }
+  function saveHistory(h){ try{ sessionStorage.setItem(MEMKEY, JSON.stringify(h.slice(-20))); }catch{} }
+  let history = loadHistory();
+
+  function appendMsg(role, text, {html=false, images=[]}={}){
+    const el = document.createElement('div');
+    el.className = `ai-msg ${role}`;
+    const content = html ? text : md(text);
+    el.innerHTML = content;
+    if (images && images.length){
+      const row = document.createElement('div'); row.className='imgrow';
+      images.forEach(src=>{
+        const img=new Image(); img.src = src; img.loading='lazy'; row.appendChild(img);
+      });
+      el.appendChild(row);
+    }
+    bodyEl.appendChild(el);
+    bodyEl.scrollTop = bodyEl.scrollHeight;
+  }
+
+  function showGreeting(){
+    if (history.length) return;
+    appendMsg('bot', `Hey! I'm your album assistant.  
+Ask me about **AAVSS**, the **Sri Lankan dataset**, or anything you see here.  
+I can also show images or drill into **Sensors**, **Fusion**, **Specs** and more.`);
+    showSuggestions('general');
+  }
+
+  function showSuggestions(topic='general'){
+    const base = [
+      {t:'Overview', q:'Give me a quick overview.'},
+      {t:'How it works?', q:'How does it work end-to-end?'},
+      {t:'Specs', q:'Share the main specs.'},
+    ];
+    const aav = [
+      {t:'Sensors', q:'What sensors are used and why?'},
+      {t:'Fusion',  q:'Explain the fusion pipeline.'},
+      {t:'Safety',  q:'What safety analytics do you run?'},
+      {t:'Show images', q:'Show images from this album.'}
+    ];
+    const dset = [
+      {t:'License', q:'What license and distribution do you use?'},
+      {t:'Annotations', q:'What are the annotation types & metrics?'},
+      {t:'Night driving', q:'How is the dataset for night driving?'},
+      {t:'Show images', q:'Show images from this album.'}
+    ];
+    const list = topic==='aavss' ? aav : topic==='sldataset' ? dset : base.concat([{t:'Show images', q:'Show images from this album.'}]);
+
+    sugEl.innerHTML = '';
+    list.forEach(({t,q})=>{
+      const b = document.createElement('button'); b.className='ai-chip'; b.textContent=t;
+      b.addEventListener('click', ()=> { inp.value = q; send.click(); });
+      sugEl.appendChild(b);
+    });
+  }
+
+  function detectSmallTalk(q){
+    return /\b(hi|hello|hey|how are you|what's up|good morning|good evening|thank(s| you)|bye)\b/i.test(q);
+  }
+
+  function detectTopicLocal(q){
+    const s=q.toLowerCase();
+    const aHits = /(aavss|fusion|radar|lidar|lane|tracking|jetson|adas|safety|tensorrt)/.test(s);
+    const dHits = /(dataset|data set|sri lanka|annotation|label|split|download|license|classes|night driving)/.test(s);
+    if (aHits && !dHits) return 'aavss';
+    if (dHits && !aHits) return 'sldataset';
+    return 'general';
+  }
+
+  function currentAlbumImages(max=6){
+    if (!window.currentAlbum || !Array.isArray(currentAlbum.media)) return [];
+    return currentAlbum.media.filter(m=>m.type==='image').slice(0,max).map(m=>m.src);
+  }
+
+  async function routeAsk(question){
+    // 1) render user bubble
+    appendMsg('user', question);
+    history.push({role:'user', content:question}); saveHistory(history);
+
+    // 2) decide provider
+    const topic = detectTopicLocal(question);
+    let answer = '';
+    try{
+      if (detectSmallTalk(question)) {
+        // friendly small-talk via your generic /api/ai (use album context if available)
+        const ctx = typeof buildAlbumContext === 'function' ? buildAlbumContext(window.currentAlbum || null) : '';
+        answer = await aiAsk(question, ctx);
+      } else {
+        // technical Q&A via your expert endpoint (KB-grounded)
+        // add a tiny local context of prior 3 turns to encourage continuity without breaking your server prompt
+        const recent = history.slice(-6);
+        const prefix = recent.length
+          ? 'Previous context:\n' + recent.map(m=>`${m.role==="user"?"Q":"A"}: ${m.content}`).join('\n') + '\n---\n'
+          : '';
+        answer = await expertAsk(prefix + question);
+      }
+    } catch(err){
+      try{
+        // fallback to generic if expert fails
+        const ctx = typeof buildAlbumContext === 'function' ? buildAlbumContext(window.currentAlbum || null) : '';
+        answer = await aiAsk(question, ctx);
+      }catch(e){
+        answer = 'Sorry — I hit a temporary issue. Please try again.';
+      }
+    }
+
+    // 3) render bot bubble
+    appendMsg('bot', answer);
+    history.push({role:'assistant', content:answer}); saveHistory(history);
+
+    // 4) follow-up chips & proactive question
+    showSuggestions(topic);
+    if (topic === 'aavss') {
+      const askRow = document.createElement('div');
+      askRow.className='ai-msg bot';
+      askRow.innerHTML = md('Would you like **sensor details** or a quick look at **fusion** next?');
+      const rowChips = document.createElement('div'); rowChips.className='ai-suggest';
+      ['Sensor details','Fusion pipeline','Show images'].forEach(t=>{
+        const b=document.createElement('button'); b.className='ai-chip'; b.textContent=t;
+        b.onclick = ()=> {
+          inp.value = t === 'Sensor details' ? 'What sensors are used and why?'
+                   : t === 'Fusion pipeline' ? 'Explain the fusion pipeline.' : 'Show images from this album.';
+          send.click();
+        };
+        rowChips.appendChild(b);
+      });
+      askRow.appendChild(rowChips);
+      bodyEl.appendChild(askRow);
+      bodyEl.scrollTop = bodyEl.scrollHeight;
+    }
+
+    // If the user asked to show images explicitly, show them
+    if (/show (me )?images|show images from this album/i.test(question)) {
+      const imgs = currentAlbumImages(8);
+      if (imgs.length) appendMsg('bot', 'Here are a few images from this album:', {images: imgs});
+      else appendMsg('bot', 'This album has no images to preview here.');
+    }
+  }
+
+  // ------- voice input (if supported) -------
+  let rec=null, recActive=false;
+  function setupMic(){
+    const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+    if (!SR){ micBtn.style.display='none'; return; }
+    rec = new SR(); rec.lang = 'en-US'; rec.continuous=false; rec.interimResults=false;
+    rec.onresult = (e)=> {
+      const txt = (e.results?.[0]?.[0]?.transcript || '').trim();
+      if (txt){ inp.value = txt; send.click(); }
+    };
+    rec.onend = ()=> { recActive=false; micBtn.classList.remove('rec'); };
+  }
+  setupMic();
+
+  // ------- wiring -------
+  function openDock(){ dock.style.display='flex'; setTimeout(()=>inp.focus(), 10); showGreeting(); }
+  function closeDock(){ dock.style.display='none'; }
+  fab.addEventListener('click', openDock);
+  minB.addEventListener('click', closeDock);
+
+  clearB.addEventListener('click', ()=>{
+    history = []; saveHistory(history);
+    bodyEl.innerHTML=''; sugEl.innerHTML='';
+    showGreeting();
+  });
+
+  send.addEventListener('click', ()=>{
+    const q = (inp.value||'').trim(); if (!q) return;
+    inp.value=''; routeAsk(q);
+  });
+  inp.addEventListener('keydown', (e)=> { if (e.key==='Enter') send.click(); });
+
+  micBtn.addEventListener('click', ()=>{
+    if (!rec) return;
+    try{
+      if (!recActive){ recActive=true; micBtn.classList.add('rec'); rec.start(); }
+      else { rec.stop(); recActive=false; micBtn.classList.remove('rec'); }
+    }catch(_){}
+  });
+
+  // show greeting on first load if user clicks FAB later
+  // (we don't show dock automatically)
+})();
+
