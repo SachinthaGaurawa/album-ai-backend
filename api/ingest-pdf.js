@@ -1,51 +1,72 @@
-// api/ingest-pdf.js
-import fetch from "node-fetch";
+// api/ingest-pdf.js — Node serverless function (NOT edge)
 import pdfParse from "pdf-parse";
 
-export const config = { runtime: "edge" };
+/** Tell Vercel to run this as a Node function */
+export const config = { runtime: "nodejs18.x" };
 
-export default async function handler(req) {
+/** Simple permissive CORS (tighten origins if you like) */
+function corsHeaders(origin) {
+  return {
+    "Access-Control-Allow-Origin": origin || "*",
+    "Access-Control-Allow-Methods": "POST, OPTIONS",
+    "Access-Control-Allow-Headers": "Content-Type, Authorization",
+    "Content-Type": "application/json; charset=utf-8",
+    "Cache-Control": "no-store",
+  };
+}
+
+export default async function handler(req, res) {
+  const origin = req.headers.origin || "*";
+
+  if (req.method === "OPTIONS") {
+    res.writeHead(204, corsHeaders(origin));
+    res.end();
+    return;
+  }
+
   if (req.method !== "POST") {
-    return new Response(JSON.stringify({ error: "Only POST allowed" }), {
-      status: 405,
-      headers: { "Content-Type": "application/json" },
-    });
+    res.writeHead(405, corsHeaders(origin));
+    res.end(JSON.stringify({ error: "Only POST allowed" }));
+    return;
   }
 
   try {
-    const { url, title, docId } = await req.json();
-
+    const { url, title = "", docId = "" } = req.body || {};
     if (!url) {
-      return new Response(JSON.stringify({ error: "Missing PDF URL" }), {
-        status: 400,
-        headers: { "Content-Type": "application/json" },
-      });
+      res.writeHead(400, corsHeaders(origin));
+      res.end(JSON.stringify({ error: "Missing PDF URL" }));
+      return;
     }
 
-    // fetch the PDF
-    const res = await fetch(url);
-    if (!res.ok) throw new Error(`Failed to fetch PDF: ${res.status}`);
-    const buffer = await res.arrayBuffer();
+    // IMPORTANT: for GitHub PDFs use RAW links (raw.githubusercontent.com/…)
+    const pdfRes = await fetch(url);
+    if (!pdfRes.ok) {
+      res.writeHead(400, corsHeaders(origin));
+      res.end(JSON.stringify({ error: `Failed to fetch PDF: ${pdfRes.status}` }));
+      return;
+    }
 
-    // parse PDF
-    const data = await pdfParse(Buffer.from(buffer));
+    const arrayBuffer = await pdfRes.arrayBuffer();
+    const buffer = Buffer.from(arrayBuffer);
 
-    // TODO: save this into your KB / DB
-    // for now we just return the text
-    return new Response(
-      JSON.stringify({
-        docId,
-        title,
-        url,
-        text: data.text.slice(0, 2000), // return first 2k chars for demo
-        status: "PDF ingested successfully",
-      }),
-      { headers: { "Content-Type": "application/json" } }
-    );
+    const parsed = await pdfParse(buffer);
+    const meta = {
+      title: title || parsed?.info?.Title || "",
+      pages: parsed?.numpages || 0,
+      docId: docId || "",
+    };
+
+    // Here you would normally index `parsed.text` into your KB/vector store.
+    // For now we just return a success payload with stats.
+    res.writeHead(200, corsHeaders(origin));
+    res.end(JSON.stringify({
+      ok: true,
+      meta,
+      bytes: buffer.length,
+      preview: parsed.text.slice(0, 600) // first 600 chars
+    }));
   } catch (err) {
-    return new Response(JSON.stringify({ error: err.message }), {
-      status: 500,
-      headers: { "Content-Type": "application/json" },
-    });
+    res.writeHead(500, corsHeaders(origin));
+    res.end(JSON.stringify({ error: err?.message || "Server error" }));
   }
 }
