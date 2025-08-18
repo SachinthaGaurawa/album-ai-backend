@@ -1,6 +1,17 @@
 // api/ai-expert.js — Edge Function (Groq → DeepInfra → Gemini) with KB + Topic-Aware Retrieval
 export const config = { runtime: 'edge' };
 
+import fs from 'fs';
+import path from 'path';
+
+function readDocsStore() {
+  try {
+    const p = path.join(process.cwd(), 'storage', 'docs.json');
+    return JSON.parse(fs.readFileSync(p, 'utf-8'));
+  } catch { return { docs: [] }; }
+}
+
+
 /* ───────────────────────────── CORS ───────────────────────────── */
 const ALLOWED_ORIGINS = (process.env.CORS_ORIGINS || '')
   .split(',')
