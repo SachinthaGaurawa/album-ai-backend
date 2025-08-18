@@ -740,3 +740,73 @@ Try: **/browse rainy highway** to fetch reference photos.`);
 
 })();
 
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+function scoreChunk(qTokens, chunk) {
+  const text = normalize(chunk.title + ' ' + chunk.text);
+  let s = 0;
+  for (const t of qTokens) {
+    if (!t) continue;
+    if (text.includes(` ${t} `) || text.startsWith(t + ' ') || text.endsWith(' ' + t)) s += 3;
+    else if (text.includes(t)) s += 1;
+  }
+  return s;
+}
+
+function topK(q, k = 8, topic = 'all') {
+  const qTokens = normalize(q).split(' ');
+
+  // 1) KB docs (existing)
+  const kbPool = KB.docs.filter(d => topic==='all' ? true : (d.topic === topic || d.topic === 'all'));
+  const kbRanked = kbPool.map(d => ({ type:'kb', id:d.id, title:d.title, text:d.text, s: scoreDoc(qTokens, d) }));
+
+  // 2) PDF chunks (dynamic)
+  const store = readDocsStore();
+  const pdfRanked = (store.docs || []).map(ch => ({
+    type:'pdf',
+    id: ch.id,
+    title: ch.title,
+    text: ch.text,
+    page: ch.page,
+    url: ch.url,
+    s: scoreChunk(qTokens, ch)
+  }));
+
+  // Merge + sort
+  const all = kbRanked.concat(pdfRanked).filter(x => x.s > 0).sort((a,b)=>b.s-a.s).slice(0, k);
+
+  // Fallback to KB overview if nothing
+  if (!all.length) {
+    if (topic === 'aavss')     return KB.docs.filter(d => d.id === 'aavss-overview').map(d => ({ type:'kb', id:d.id, title:d.title, text:d.text }));
+    if (topic === 'sldataset') return KB.docs.filter(d => d.id === 'sld-overview').map(d => ({ type:'kb', id:d.id, title:d.title, text:d.text }));
+    const f = KB.docs.filter(d => d.id === 'aavss-overview' || d.id === 'sld-overview');
+    return f.map(d => ({ type:'kb', id:d.id, title:d.title, text:d.text }));
+  }
+  return all;
+}
+
+function buildContext(q, topic='all'){
+  const k = topK(q, 8, topic);
+  const ctx = k.map((d,i)=>`#${i+1} ${d.title}\n${d.text}`).join('\n\n');
+  // ID format: keep both; include page+url when from pdf so you can show citations
+  const ids = k.map(d => d.type === 'pdf'
+    ? `pdf:${d.id}|${d.title}|page=${d.page}|${d.url}`
+    : `kb:${d.id}|${d.title}`
+  );
+  return { ctx, ids };
+}
