@@ -319,14 +319,17 @@ export default async function handler(req) {
 
 
 /* ==========================================================
-   PRO AI CHAT DOCK  —  powerful, friendly, theme-aware
+   PRO AI CHAT DOCK — now with IMAGE GENERATE + BROWSE + DOWNLOAD
+   (Non-destructive: adds to your site; keeps all existing features)
    ========================================================== */
 (function ProAiChatDock(){
-  // ------- tiny helpers -------
+  /* ---------- tiny helpers ---------- */
   const $ = (s,p=document)=>p.querySelector(s);
+  const clamp = (v,min,max)=>Math.max(min,Math.min(max,v));
   const md = (t)=> (typeof mdToHtml === 'function' ? mdToHtml(t) : (t||''));
+  const API_IMG = `${API_BASE}/api/img`;   // new endpoint provided below
 
-  // ------- CSS (injected once) -------
+  /* ---------- styles ---------- */
   const css = `
   #aiFab{
     position: fixed; right: 18px; bottom: 18px; z-index: 9999;
@@ -347,7 +350,7 @@ export default async function handler(req) {
 
   #aiDock{
     position: fixed; right: 16px; bottom: 84px; z-index: 9999;
-    width: min(720px, 92vw); max-height: min(74vh, 760px);
+    width: min(760px, 94vw); max-height: min(78vh, 820px);
     border-radius: 16px; overflow: hidden; display:none; flex-direction: column;
     border:1px solid rgba(150,190,255,.25);
     background: rgba(12,16,24,.96);
@@ -374,13 +377,23 @@ export default async function handler(req) {
     padding:6px 10px; border-radius:10px; font-size:.9rem; cursor:pointer;
   }
 
-  .ai-body{ display:flex; flex-direction:column; gap:10px; padding:12px 14px; overflow:auto; min-height:200px; }
-  .ai-msg{ max-width:88%; border:1px solid rgba(255,255,255,.08); border-radius:14px; padding:10px 12px; line-height:1.5; }
+  .ai-body{ display:flex; flex-direction:column; gap:10px; padding:12px 14px; overflow:auto; min-height:220px; }
+  .ai-msg{ max-width:92%; border:1px solid rgba(255,255,255,.08); border-radius:14px; padding:10px 12px; line-height:1.5; }
   .ai-msg.user{ margin-left:auto; background:rgba(120,170,255,.12); }
   .ai-msg.bot { background:#0e1a24; color:#e9f2f9; }
   body.is-light .ai-msg.bot { background:#f0f5ff; color:#1b2b45; border-color:rgba(0,0,0,.06); }
-  .ai-msg .imgrow{ display:grid; grid-template-columns: repeat(auto-fill, minmax(120px,1fr)); gap:8px; margin-top:8px; }
-  .ai-msg .imgrow img{ width:100%; height:100px; object-fit:cover; border-radius:10px; }
+  .ai-msg .imggrid{ display:grid; grid-template-columns: repeat(auto-fill, minmax(160px,1fr)); gap:10px; margin-top:10px; }
+  .ai-card{
+    position:relative; border-radius:12px; overflow:hidden; border:1px solid rgba(255,255,255,.08);
+  }
+  .ai-card img{ width:100%; height:160px; object-fit:cover; display:block; }
+  .ai-card .bar{
+    position:absolute; left:0; right:0; bottom:0; display:flex; gap:6px; padding:6px;
+    background:linear-gradient(180deg, rgba(0,0,0,.00), rgba(0,0,0,.55));
+  }
+  .ai-mini{ border:1px solid rgba(255,255,255,.45); background:rgba(0,0,0,.35); color:#fff;
+            padding:4px 8px; border-radius:999px; font-size:.78rem; cursor:pointer; }
+  body.is-light .ai-mini{ background:rgba(255,255,255,.75); color:#1b2b45; border-color:rgba(0,0,0,.15); }
 
   .ai-suggest{ display:flex; flex-wrap:wrap; gap:8px; padding:0 14px 10px; }
   .ai-chip{ border:1px dashed rgba(150,190,255,.35); padding:6px 10px; border-radius:999px; cursor:pointer; }
@@ -403,12 +416,9 @@ export default async function handler(req) {
   const style = document.createElement('style'); style.id = 'pro-ai-dock-css'; style.textContent = css;
   document.head.appendChild(style);
 
-  // ------- DOM (built once) -------
+  /* ---------- structure ---------- */
   const fab = document.createElement('button');
-  fab.id = 'aiFab';
-  fab.type = 'button';
-  fab.title = 'Open assistant';
-  fab.innerHTML = '🤖';
+  fab.id = 'aiFab'; fab.type = 'button'; fab.title = 'Open assistant'; fab.innerHTML = '🤖';
   document.body.appendChild(fab);
 
   const dock = document.createElement('section'); dock.id = 'aiDock'; dock.setAttribute('aria-live','polite');
@@ -416,6 +426,8 @@ export default async function handler(req) {
     <div class="ai-head">
       <div class="title"><span class="dot"></span><span>Assistant</span></div>
       <div class="actions">
+        <button class="ai-btn" id="aiGenBtn" title="Generate images">Generate</button>
+        <button class="ai-btn" id="aiBrowseBtn" title="Browse images">Browse</button>
         <button class="ai-btn" id="aiClear">Clear</button>
         <button class="ai-btn" id="aiMin">Minimize</button>
       </div>
@@ -423,7 +435,7 @@ export default async function handler(req) {
     <div class="ai-body" id="aiBody"></div>
     <div class="ai-suggest" id="aiSuggest"></div>
     <div class="ai-input">
-      <input id="aiInput" type="text" placeholder="Ask anything… (e.g., What is AAVSS?)">
+      <input id="aiInput" type="text" placeholder="Ask anything… (e.g., What is AAVSS?  or  /gen a rainy highway at night)">
       <button class="ai-mic" id="aiMic" title="Voice"></button>
       <button class="ai-send" id="aiSend">Send</button>
     </div>`;
@@ -436,69 +448,94 @@ export default async function handler(req) {
   const send   = $('#aiSend', dock);
   const clearB = $('#aiClear', dock);
   const minB   = $('#aiMin', dock);
+  const genB   = $('#aiGenBtn', dock);
+  const browseB= $('#aiBrowseBtn', dock);
 
-  // ------- simple session memory -------
+  /* ---------- local session memory ---------- */
   const MEMKEY = 'aiDockHistory';
   function loadHistory(){ try{ return JSON.parse(sessionStorage.getItem(MEMKEY)||'[]'); }catch{ return []; } }
-  function saveHistory(h){ try{ sessionStorage.setItem(MEMKEY, JSON.stringify(h.slice(-20))); }catch{} }
+  function saveHistory(h){ try{ sessionStorage.setItem(MEMKEY, JSON.stringify(h.slice(-24))); }catch{} }
   let history = loadHistory();
 
+  /* ---------- render helpers ---------- */
   function appendMsg(role, text, {html=false, images=[]}={}){
     const el = document.createElement('div');
     el.className = `ai-msg ${role}`;
-    const content = html ? text : md(text);
-    el.innerHTML = content;
+    el.innerHTML = html ? text : md(text);
     if (images && images.length){
-      const row = document.createElement('div'); row.className='imgrow';
-      images.forEach(src=>{
-        const img=new Image(); img.src = src; img.loading='lazy'; row.appendChild(img);
-      });
-      el.appendChild(row);
+      const grid = document.createElement('div'); grid.className='imggrid';
+      images.forEach((img)=> grid.appendChild(makeImgCard(img)));
+      el.appendChild(grid);
     }
-    bodyEl.appendChild(el);
-    bodyEl.scrollTop = bodyEl.scrollHeight;
+    bodyEl.appendChild(el); bodyEl.scrollTop = bodyEl.scrollHeight;
+  }
+  function makeImgCard(img){
+    // img: { url, thumb?, source?, filename? }
+    const card = document.createElement('div'); card.className='ai-card';
+    const im = new Image();
+    im.src = img.thumb || img.url; im.loading='lazy'; card.appendChild(im);
+    const bar = document.createElement('div'); bar.className='bar';
+    const open = document.createElement('button'); open.className='ai-mini'; open.textContent='Open';
+    const dl = document.createElement('button'); dl.className='ai-mini'; dl.textContent='Download';
+    open.onclick = ()=> window.open(img.url, '_blank', 'noopener');
+    dl.onclick = ()=> downloadImage(img.url, img.filename || 'image.jpg');
+    bar.appendChild(open); bar.appendChild(dl);
+    card.appendChild(bar);
+    return card;
+  }
+  async function downloadImage(url, filename){
+    try{
+      const r = await fetch(url, { mode: 'cors' });
+      const b = await r.blob();
+      const a = document.createElement('a');
+      a.href = URL.createObjectURL(b);
+      a.download = filename || 'image.jpg';
+      document.body.appendChild(a); a.click(); a.remove();
+      setTimeout(()=> URL.revokeObjectURL(a.href), 1500);
+    }catch{
+      // Fallback: open in new tab
+      window.open(url, '_blank', 'noopener');
+    }
   }
 
   function showGreeting(){
     if (history.length) return;
-    appendMsg('bot', `Hey! I'm your album assistant.  
-Ask me about **AAVSS**, the **Sri Lankan dataset**, or anything you see here.  
-I can also show images or drill into **Sensors**, **Fusion**, **Specs** and more.`);
+    appendMsg('bot', `Hey! I’m your album assistant.  
+Ask about **AAVSS**, the **Sri Lankan dataset**, or say **/gen** to create images.  
+Try: **/browse rainy highway** to fetch reference photos.`);
     showSuggestions('general');
   }
-
   function showSuggestions(topic='general'){
     const base = [
       {t:'Overview', q:'Give me a quick overview.'},
       {t:'How it works?', q:'How does it work end-to-end?'},
       {t:'Specs', q:'Share the main specs.'},
+      {t:'Generate image', q:'/gen photoreal car on a rainy Colombo street, night, headlights reflections'},
+      {t:'Browse images', q:'/browse rainy highway night'}
     ];
     const aav = [
       {t:'Sensors', q:'What sensors are used and why?'},
       {t:'Fusion',  q:'Explain the fusion pipeline.'},
       {t:'Safety',  q:'What safety analytics do you run?'},
-      {t:'Show images', q:'Show images from this album.'}
+      {t:'Generate image', q:'/gen driver monitoring HUD alert, photoreal cockpit'}
     ];
     const dset = [
       {t:'License', q:'What license and distribution do you use?'},
       {t:'Annotations', q:'What are the annotation types & metrics?'},
       {t:'Night driving', q:'How is the dataset for night driving?'},
-      {t:'Show images', q:'Show images from this album.'}
+      {t:'Browse images', q:'/browse sri lanka urban rain driving'}
     ];
-    const list = topic==='aavss' ? aav : topic==='sldataset' ? dset : base.concat([{t:'Show images', q:'Show images from this album.'}]);
-
+    const list = topic==='aavss' ? aav : topic==='sldataset' ? dset : base;
     sugEl.innerHTML = '';
     list.forEach(({t,q})=>{
-      const b = document.createElement('button'); b.className='ai-chip'; b.textContent=t;
-      b.addEventListener('click', ()=> { inp.value = q; send.click(); });
-      sugEl.appendChild(b);
+      const b=document.createElement('button'); b.className='ai-chip'; b.textContent=t;
+      b.onclick=()=>{ inp.value=q; send.click(); }; sugEl.appendChild(b);
     });
   }
 
   function detectSmallTalk(q){
-    return /\b(hi|hello|hey|how are you|what's up|good morning|good evening|thank(s| you)|bye)\b/i.test(q);
+    return /\b(hi|hello|hey|how are you|what's up|good (morning|evening)|thanks?|bye)\b/i.test(q);
   }
-
   function detectTopicLocal(q){
     const s=q.toLowerCase();
     const aHits = /(aavss|fusion|radar|lidar|lane|tracking|jetson|adas|safety|tensorrt)/.test(s);
@@ -507,78 +544,149 @@ I can also show images or drill into **Sensors**, **Fusion**, **Specs** and more
     if (dHits && !aHits) return 'sldataset';
     return 'general';
   }
-
-  function currentAlbumImages(max=6){
+  function albumImages(max=8){
     if (!window.currentAlbum || !Array.isArray(currentAlbum.media)) return [];
-    return currentAlbum.media.filter(m=>m.type==='image').slice(0,max).map(m=>m.src);
+    return currentAlbum.media.filter(m=>m.type==='image').slice(0,max).map(m=>({url:m.src, thumb:m.src}));
   }
 
-  async function routeAsk(question){
-    // 1) render user bubble
-    appendMsg('user', question);
-    history.push({role:'user', content:question}); saveHistory(history);
+  /* ---------- backend calls ---------- */
+  async function apiImgGenerate({prompt, n=2, aspect='16:9', realism='photo', seed=null}){
+    const r = await fetch(API_IMG, {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({ mode:'generate', prompt, n, aspect, realism, seed })
+    });
+    const j = await r.json().catch(()=> ({}));
+    if (!r.ok) throw new Error(j.error || 'Generation failed');
+    // returns { images:[{url, thumb?, filename?}], provider, meta }
+    return j;
+  }
+  async function apiImgSearch({query, n=8}){
+    const r = await fetch(API_IMG, {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({ mode:'search', query, n })
+    });
+    const j = await r.json().catch(()=> ({}));
+    if (!r.ok) throw new Error(j.error || 'Search failed');
+    // returns { images:[{url, thumb, source, author}], provider }
+    return j;
+  }
 
-    // 2) decide provider
-    const topic = detectTopicLocal(question);
-    let answer = '';
+  /* ---------- routes ---------- */
+  function isGenCommand(q){ return /^\/?gen\b/i.test(q) || /^generate\b/i.test(q); }
+  function isBrowseCommand(q){ return /^\/?browse\b/i.test(q) || /^(find|search)\b.+(image|photo)/i.test(q); }
+
+  async function route(q){
+    // render user
+    appendMsg('user', q); history.push({role:'user', content:q}); saveHistory(history);
+
     try{
-      if (detectSmallTalk(question)) {
-        // friendly small-talk via your generic /api/ai (use album context if available)
-        const ctx = typeof buildAlbumContext === 'function' ? buildAlbumContext(window.currentAlbum || null) : '';
-        answer = await aiAsk(question, ctx);
-      } else {
-        // technical Q&A via your expert endpoint (KB-grounded)
-        // add a tiny local context of prior 3 turns to encourage continuity without breaking your server prompt
-        const recent = history.slice(-6);
-        const prefix = recent.length
-          ? 'Previous context:\n' + recent.map(m=>`${m.role==="user"?"Q":"A"}: ${m.content}`).join('\n') + '\n---\n'
-          : '';
-        answer = await expertAsk(prefix + question);
+      if (isGenCommand(q)) {
+        const prompt = q.replace(/^\/?gen(?:erate)?\s*/i,'').trim() || await promptForGen();
+        if (!prompt) return;
+        await doGenerateFlow(prompt);
+        return;
       }
-    } catch(err){
+      if (isBrowseCommand(q)) {
+        const query = q.replace(/^\/?browse\s*/i,'').trim() || q.replace(/^(find|search)\s*/i,'').trim();
+        await doBrowseFlow(query);
+        return;
+      }
+
+      // not image-specific → text Q&A
+      const topic = detectTopicLocal(q);
+      let answer = '';
       try{
-        // fallback to generic if expert fails
+        if (detectSmallTalk(q)) {
+          const ctx = typeof buildAlbumContext === 'function' ? buildAlbumContext(window.currentAlbum || null) : '';
+          answer = await aiAsk(q, ctx);
+        } else {
+          const recent = history.slice(-6);
+          const prefix = recent.length
+            ? 'Previous context:\n' + recent.map(m=>`${m.role==="user"?"Q":"A"}: ${m.content}`).join('\n') + '\n---\n'
+            : '';
+          answer = await expertAsk(prefix + q);
+        }
+      }catch(_){
         const ctx = typeof buildAlbumContext === 'function' ? buildAlbumContext(window.currentAlbum || null) : '';
-        answer = await aiAsk(question, ctx);
-      }catch(e){
-        answer = 'Sorry — I hit a temporary issue. Please try again.';
+        answer = await aiAsk(q, ctx);
       }
-    }
+      appendMsg('bot', answer);
+      history.push({role:'assistant', content:answer}); saveHistory(history);
+      showSuggestions(topic);
 
-    // 3) render bot bubble
-    appendMsg('bot', answer);
-    history.push({role:'assistant', content:answer}); saveHistory(history);
-
-    // 4) follow-up chips & proactive question
-    showSuggestions(topic);
-    if (topic === 'aavss') {
-      const askRow = document.createElement('div');
-      askRow.className='ai-msg bot';
-      askRow.innerHTML = md('Would you like **sensor details** or a quick look at **fusion** next?');
-      const rowChips = document.createElement('div'); rowChips.className='ai-suggest';
-      ['Sensor details','Fusion pipeline','Show images'].forEach(t=>{
-        const b=document.createElement('button'); b.className='ai-chip'; b.textContent=t;
-        b.onclick = ()=> {
-          inp.value = t === 'Sensor details' ? 'What sensors are used and why?'
-                   : t === 'Fusion pipeline' ? 'Explain the fusion pipeline.' : 'Show images from this album.';
-          send.click();
-        };
-        rowChips.appendChild(b);
-      });
-      askRow.appendChild(rowChips);
-      bodyEl.appendChild(askRow);
-      bodyEl.scrollTop = bodyEl.scrollHeight;
-    }
-
-    // If the user asked to show images explicitly, show them
-    if (/show (me )?images|show images from this album/i.test(question)) {
-      const imgs = currentAlbumImages(8);
-      if (imgs.length) appendMsg('bot', 'Here are a few images from this album:', {images: imgs});
-      else appendMsg('bot', 'This album has no images to preview here.');
+      if (/show (me )?images/i.test(q)) {
+        const imgs = albumImages(8);
+        if (imgs.length) appendMsg('bot', 'Here are a few images from this album:', {images: imgs});
+      }
+    }catch(err){
+      appendMsg('bot', `Sorry — ${err.message || 'something went wrong.'}`);
     }
   }
 
-  // ------- voice input (if supported) -------
+  /* ---------- image flows ---------- */
+  async function promptForGen(){
+    // inline mini form bubble
+    const id = 'genform_'+Date.now();
+    const html = `
+      <div>
+        <div style="font-weight:700;margin-bottom:6px">Generate photoreal image</div>
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:6px;margin-bottom:8px">
+          <input id="${id}_prompt" placeholder="Describe the image (e.g., rainy highway at night, reflections)">
+          <select id="${id}_aspect" title="Aspect">
+            <option value="1:1">1:1</option>
+            <option value="16:9" selected>16:9</option>
+            <option value="9:16">9:16</option>
+            <option value="4:3">4:3</option>
+          </select>
+          <select id="${id}_n" title="Count">
+            <option>1</option><option selected>2</option><option>3</option><option>4</option>
+          </select>
+          <select id="${id}_realism" title="Style">
+            <option value="photo" selected>Photoreal</option>
+            <option value="cinematic">Cinematic</option>
+            <option value="studio">Studio</option>
+          </select>
+        </div>
+        <button class="ai-mini" id="${id}_go">Generate</button>
+      </div>`;
+    appendMsg('bot', html, {html:true});
+    const go = document.getElementById(`${id}_go`);
+    return new Promise(resolve=>{
+      go.onclick = ()=>{
+        const prompt = (document.getElementById(`${id}_prompt`).value||'').trim();
+        const aspect = document.getElementById(`${id}_aspect`).value;
+        const n = clamp(parseInt(document.getElementById(`${id}_n`).value,10)||2,1,4);
+        const realism = document.getElementById(`${id}_realism`).value;
+        if (!prompt){ resolve(''); return; }
+        // stash structured command back into input history
+        history.push({role:'user', content:`/gen ${prompt} [${aspect}, ${n}, ${realism}]`}); saveHistory(history);
+        resolve(JSON.stringify({prompt, aspect, n, realism}));
+      };
+    }).then(v=>{
+      try{ const o = JSON.parse(v); return `${o.prompt}|||${o.aspect}|||${o.n}|||${o.realism}`; }catch{ return v; }
+    });
+  }
+
+  async function doGenerateFlow(promptOrPacked){
+    let prompt = promptOrPacked, aspect='16:9', n=2, realism='photo';
+    if (promptOrPacked.includes('|||')) {
+      const [p,a,c,r] = promptOrPacked.split('|||'); prompt=p; aspect=a; n=parseInt(c,10)||2; realism=r||'photo';
+    }
+    appendMsg('bot', `Generating **${prompt}** …`);
+    const res = await apiImgGenerate({prompt, n, aspect, realism});
+    if (!res?.images?.length){ appendMsg('bot','No images returned.'); return; }
+    appendMsg('bot', `Here you go${res.provider ? ` _(provider: ${res.provider})_` : ''}:`, {images: res.images});
+  }
+
+  async function doBrowseFlow(query){
+    const q = (query||'').trim(); if (!q){ appendMsg('bot','What should I search?'); return; }
+    appendMsg('bot', `Searching images for **${q}** …`);
+    const res = await apiImgSearch({query:q, n: 12});
+    if (!res?.images?.length){ appendMsg('bot','No results. Try a different query.'); return; }
+    appendMsg('bot', `Top matches${res.provider ? ` _(source: ${res.provider})_` : ''}:`, {images: res.images});
+  }
+
+  /* ---------- voice input ---------- */
   let rec=null, recActive=false;
   function setupMic(){
     const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
@@ -592,24 +700,16 @@ I can also show images or drill into **Sensors**, **Fusion**, **Specs** and more
   }
   setupMic();
 
-  // ------- wiring -------
+  /* ---------- wiring ---------- */
   function openDock(){ dock.style.display='flex'; setTimeout(()=>inp.focus(), 10); showGreeting(); }
   function closeDock(){ dock.style.display='none'; }
   fab.addEventListener('click', openDock);
   minB.addEventListener('click', closeDock);
-
   clearB.addEventListener('click', ()=>{
-    history = []; saveHistory(history);
-    bodyEl.innerHTML=''; sugEl.innerHTML='';
-    showGreeting();
+    history = []; saveHistory(history); bodyEl.innerHTML=''; sugEl.innerHTML=''; showGreeting();
   });
-
-  send.addEventListener('click', ()=>{
-    const q = (inp.value||'').trim(); if (!q) return;
-    inp.value=''; routeAsk(q);
-  });
+  send.addEventListener('click', ()=>{ const q=(inp.value||'').trim(); if(!q) return; inp.value=''; route(q); });
   inp.addEventListener('keydown', (e)=> { if (e.key==='Enter') send.click(); });
-
   micBtn.addEventListener('click', ()=>{
     if (!rec) return;
     try{
@@ -618,7 +718,14 @@ I can also show images or drill into **Sensors**, **Fusion**, **Specs** and more
     }catch(_){}
   });
 
-  // show greeting on first load if user clicks FAB later
-  // (we don't show dock automatically)
+  genB.addEventListener('click', async ()=> {
+    const packed = await promptForGen();
+    if (packed) await doGenerateFlow(packed);
+  });
+  browseB.addEventListener('click', async ()=>{
+    const q = (prompt('Browse images for…', 'rainy highway night')||'').trim();
+    if (q) await doBrowseFlow(q);
+  });
+
 })();
 
