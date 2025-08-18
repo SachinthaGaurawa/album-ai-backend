@@ -1,9 +1,13 @@
 {
   "version": 2,
-  "routes": [
-    {
-      "src": "/api/ai",
-      "dest": "/api/ai.js"
+  "functions": {
+    "api/*.js": {
+      "runtime": "nodejs18.x",
+      "memory": 1024,
+      "maxDuration": 30
     }
+  },
+  "rewrites": [
+    { "source": "/api/ai", "destination": "/api/ai.js" }
   ]
 }
