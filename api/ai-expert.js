@@ -22,6 +22,18 @@ async function readJson(req) {
   }
 }
 
+// Load docs.json store (now via API instead of local fs for Vercel)
+async function readDocsStore() {
+  try {
+    const base = process.env.API_BASE || "https://album-ai-backend-new.vercel.app";
+    const r = await fetch(`${base.replace(/\/+$/,"")}/api/docs.json`);
+    const j = await r.json();
+    return j && Array.isArray(j.docs) ? { docs: j.docs } : { docs: [] };
+  } catch {
+    return { docs: [] };
+  }
+}
+
 
 
 
