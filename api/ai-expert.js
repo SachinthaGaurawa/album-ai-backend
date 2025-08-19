@@ -1,6 +1,9 @@
 // BACK-END ONLY (Edge function)
 const API_BASE = process.env.API_BASE || 'https://album-ai-backend-new.vercel.app';
 
+await fetch(`${API_BASE}/api/img`, { /* ... */ });
+
+
 
 
 // api/ai-expert.js — Edge Function (Groq → DeepInfra → Gemini) with KB + Topic-Aware Retrieval
