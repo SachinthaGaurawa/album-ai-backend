@@ -13,8 +13,10 @@ function corsHeaders(origin) {
     .split(",")
     .map((s) => s.trim().replace(/\/+$/, ""))
     .filter(Boolean);
+
   const o = (origin || "").replace(/\/+$/, "");
   const allow = !origin || ALLOWED.length === 0 || ALLOWED.includes(o);
+
   return {
     ...(allow ? { "Access-Control-Allow-Origin": origin || "*" } : {}),
     "Access-Control-Allow-Methods": "POST, OPTIONS",
@@ -71,7 +73,6 @@ const OWNER = {
 const KB = {
   meta: { project: "Album Expert KB", version: "2025-08-19", topics: ["aavss", "sldataset", "about"] },
   docs: [
-    // AAVSS
     {
       id: "aavss-overview",
       topic: "aavss",
@@ -101,8 +102,6 @@ const KB = {
         "Calibration → time-sync → per-sensor detection/feature extraction → object association " +
         "→ tracking → risk scoring/alerting. Safety analytics delivered in-cabin as HUD/alerts.",
     },
-
-    // Sri Lanka Dataset
     {
       id: "sld-overview",
       topic: "sldataset",
@@ -111,8 +110,6 @@ const KB = {
         "Open driving dataset across Sri Lankan road scenarios (urban/rural; rain, fog, night). " +
         "Includes annotations for lanes, signs, and hazards. Example media included; add PDFs for specs.",
     },
-
-    // About / Ownership / You
     {
       id: "about-owner",
       topic: "about",
@@ -172,13 +169,7 @@ async function topK(question, k = 8, topic = "all") {
   // 1) KB
   const kbPool = topic === "all" ? KB.docs : KB.docs.filter((d) => d.topic === topic || d.topic === "all" || topic === "about");
   const kbRanked = kbPool
-    .map((d) => ({
-      type: "kb",
-      id: d.id,
-      title: d.title,
-      text: d.text,
-      s: scoreText(qTok, `${d.title}\n${d.text}`),
-    }))
+    .map((d) => ({ type: "kb", id: d.id, title: d.title, text: d.text, s: scoreText(qTok, `${d.title}\n${d.text}`) }))
     .filter((x) => x.s > 0);
 
   // 2) PDFs
@@ -208,80 +199,53 @@ async function topK(question, k = 8, topic = "all") {
 async function buildContext(question, topic) {
   const ranked = await topK(question, 8, topic);
   const ctx = ranked.map((d, i) => `#${i + 1} ${d.title}\n${d.text}`).join("\n\n");
-
   const ids = ranked.map((d) =>
     d.type === "pdf" ? `pdf:${d.id}|${d.title}|page=${d.page}|${d.url}` : `kb:${d.id}|${d.title}`
   );
-
   const maxUnit = Math.max(...ranked.map((r) => r.s), 1);
-  const confidence = Math.min(
-    1,
-    ranked.length ? ranked.reduce((a, r) => a + r.s / maxUnit, 0) / ranked.length : 0
-  );
-
+  const confidence = Math.min(1, ranked.length ? ranked.reduce((a, r) => a + r.s / maxUnit, 0) / ranked.length : 0);
   return { ctx, ids, confidence };
 }
 
 /* ------------------------ model providers ------------------ */
 
 async function askGroq({ system, user, signal }) {
-  const key = process.env.GROQ_API_KEY;
-  if (!key) throw new Error("GROQ_API_KEY not set");
+  const key = process.env.GROQ_API_KEY; if (!key) throw new Error("GROQ_API_KEY not set");
   const r = await fetch("https://api.groq.com/openai/v1/chat/completions", {
-    method: "POST",
-    signal,
+    method: "POST", signal,
     headers: { Authorization: `Bearer ${key}`, "Content-Type": "application/json" },
-    body: JSON.stringify({
-      model: "llama-3.1-70b-versatile",
-      temperature: 0.2,
-      max_tokens: 450,
-      messages: [{ role: "system", content: system }, { role: "user", content: user }],
-    }),
+    body: JSON.stringify({ model: "llama-3.1-70b-versatile", temperature: 0.2, max_tokens: 450,
+      messages: [{ role: "system", content: system }, { role: "user", content: user }] }),
   });
   if (!r.ok) throw new Error(`Groq HTTP ${r.status}`);
-  const j = await r.json();
-  return (j?.choices?.[0]?.message?.content ?? "").trim();
+  const j = await r.json(); return (j?.choices?.[0]?.message?.content ?? "").trim();
 }
 
 async function askDeepInfra({ system, user, signal }) {
-  const key = process.env.DEEPINFRA_API_KEY;
-  if (!key) throw new Error("DEEPINFRA_API_KEY not set");
+  const key = process.env.DEEPINFRA_API_KEY; if (!key) throw new Error("DEEPINFRA_API_KEY not set");
   const r = await fetch("https://api.deepinfra.com/v1/openai/chat/completions", {
-    method: "POST",
-    signal,
+    method: "POST", signal,
     headers: { Authorization: `Bearer ${key}`, "Content-Type": "application/json" },
-    body: JSON.stringify({
-      model: "meta-llama/Meta-Llama-3.1-8B-Instruct",
-      temperature: 0.2,
-      max_tokens: 450,
-      messages: [{ role: "system", content: system }, { role: "user", content: user }],
-    }),
+    body: JSON.stringify({ model: "meta-llama/Meta-Llama-3.1-8B-Instruct", temperature: 0.2, max_tokens: 450,
+      messages: [{ role: "system", content: system }, { role: "user", content: user }] }),
   });
   if (!r.ok) throw new Error(`DeepInfra HTTP ${r.status}`);
-  const j = await r.json();
-  return (j?.choices?.[0]?.message?.content ?? "").trim();
+  const j = await r.json(); return (j?.choices?.[0]?.message?.content ?? "").trim();
 }
 
 async function askGemini({ system, user, signal }) {
-  const key = process.env.GEMINI_API_KEY;
-  if (!key) throw new Error("GEMINI_API_KEY not set");
+  const key = process.env.GEMINI_API_KEY; if (!key) throw new Error("GEMINI_API_KEY not set");
   const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${encodeURIComponent(key)}`;
   const r = await fetch(url, {
-    method: "POST",
-    signal,
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      contents: [{ role: "user", parts: [{ text: `${system}\n\n---\n\n${user}` }] }],
-      generationConfig: { temperature: 0.2, maxOutputTokens: 450 },
-    }),
+    method: "POST", signal, headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ contents: [{ role: "user", parts: [{ text: `${system}\n\n---\n\n${user}` }] }],
+                           generationConfig: { temperature: 0.2, maxOutputTokens: 450 } }),
   });
   if (!r.ok) throw new Error(`Gemini HTTP ${r.status}`);
   const j = await r.json();
-  const text =
-    j?.candidates?.[0]?.content?.parts?.map((p) => p?.text || "").join("").trim() ||
-    j?.candidates?.[0]?.content?.parts?.[0]?.text?.trim() ||
-    "";
-  return text;
+  const txt = j?.candidates?.[0]?.content?.parts?.map(p => p?.text || "").join("").trim()
+           || j?.candidates?.[0]?.content?.parts?.[0]?.text?.trim() || "";
+  return txt;
 }
 
 /* ---------------------- prompting strategy ------------------ */
@@ -290,7 +254,7 @@ function systemPrompt(topic) {
   return [
     "You are a warm, helpful technical assistant for an album/portfolio site.",
     "Respond ONLY with facts found in the provided Knowledge Base (KB) below.",
-    "If something isn't in the KB, say so briefly and invite the user to upload or ingest a PDF.",
+    "If something isn't in the KB, say so briefly and invite the user to provide/ingest a PDF.",
     "Prefer short paragraphs and bullets. Use **bold** for key terms. Include friendly emojis sparingly.",
     `Topic focus: ${topic}. Stay on one topic unless user explicitly asks to compare.`,
     "Keep tone human, supportive, and concise. Offer 2–4 smart follow-up questions.",
@@ -340,12 +304,7 @@ function buildFollowups(topic) {
 function smallTalk(question) {
   const q = normalize(question);
   if (/^(hi|hey|hello|ayubowan|good (morning|evening|afternoon))\b/.test(q))
-    return {
-      type: "greet",
-      reply:
-        `Hi there! I'm your assistant 🤝  Ask me about **AAVSS**, the **Sri Lanka dataset**, or upload a PDF for deeper answers.\n` +
-        `I can also **generate images** or **browse references**. What shall we do first?`,
-    };
+    return { type: "greet", reply: `Hi there! I'm your assistant 🤝  Ask me about **AAVSS**, the **Sri Lanka dataset**, or upload a PDF for deeper answers.\nI can also **generate images** or **browse references**. What shall we do first?` };
   if (/^(thanks|thank you|cheers|appreciate)/.test(q))
     return { type: "thanks", reply: "You’re welcome! 😊  Want me to summarize something next?" };
   if (/^(bye|goodbye|see you|catch you)/.test(q))
@@ -375,6 +334,12 @@ module.exports = async function handler(req, res) {
     const rawQ = (body?.question ?? body?.q ?? body?.text ?? "").toString();
     const question = rawQ.trim();
 
+    if (question === "__ping__") {
+      res.writeHead(200, headers);
+      res.end(JSON.stringify({ ok: true }));
+      return;
+    }
+
     if (!question) {
       res.writeHead(400, headers);
       res.end(JSON.stringify({ error: "Missing question" }));
@@ -385,15 +350,7 @@ module.exports = async function handler(req, res) {
     const st = smallTalk(question);
     if (st) {
       res.writeHead(200, headers);
-      res.end(
-        JSON.stringify({
-          answer: st.reply,
-          provider: "smalltalk",
-          topic: "general",
-          sources: [],
-          followups: buildFollowups("all"),
-        })
-      );
+      res.end(JSON.stringify({ answer: st.reply, provider: "smalltalk", topic: "general", sources: [], followups: buildFollowups("all") }));
       return;
     }
 
@@ -401,7 +358,6 @@ module.exports = async function handler(req, res) {
     const topic = detectTopic(question);
     const { ctx, ids, confidence } = await buildContext(question, topic);
 
-    // If retrieval is weak, gently clarify
     if (!ctx || ctx.length < 20 || confidence < 0.15) {
       const choices = [
         { id: "aavss", label: "AAVSS (vehicle safety system)" },
@@ -409,17 +365,10 @@ module.exports = async function handler(req, res) {
         { id: "about", label: "About/Ownership" },
       ];
       res.writeHead(200, headers);
-      res.end(
-        JSON.stringify({
-          answer:
-            "I can help best if I know the topic. Which would you like to talk about? (AAVSS, Dataset, or About) 🙂",
-          provider: "clarify",
-          topic: "general",
-          sources: [],
-          followups: choices.map((c) => `Switch to ${c.label}?`),
-          choices,
-        })
-      );
+      res.end(JSON.stringify({
+        answer: "I can help best if I know the topic. Which would you like to talk about? (AAVSS, Dataset, or About) 🙂",
+        provider: "clarify", topic: "general", sources: [], followups: choices.map(c => `Switch to ${c.label}?`), choices
+      }));
       return;
     }
 
@@ -444,36 +393,30 @@ module.exports = async function handler(req, res) {
 
     // Fallback: stitched KB
     if (!answer) {
-      const stitched = ids
-        .map((id, i) => {
-          const [kind, rest] = id.split(":");
-          if (kind === "kb") {
-            const kbId = rest.split("|")[0];
-            const d = KB.docs.find((x) => x.id === kbId);
-            return d ? `(${i + 1}) ${d.title}\n${d.text}` : "";
-          }
-          if (kind === "pdf") {
-            const title = rest.split("|")[0];
-            return `(${i + 1}) ${title} (from PDF)`;
-          }
-          return "";
-        })
-        .filter(Boolean)
-        .join("\n\n");
+      const stitched = ids.map((id, i) => {
+        const [kind, rest] = id.split(":");
+        if (kind === "kb") {
+          const kbId = rest.split("|")[0];
+          const d = KB.docs.find((x) => x.id === kbId);
+          return d ? `(${i + 1}) ${d.title}\n${d.text}` : "";
+        }
+        if (kind === "pdf") {
+          const title = rest.split("|")[0];
+          return `(${i + 1}) ${title} (from PDF)`;
+        }
+        return "";
+      }).filter(Boolean).join("\n\n");
 
-      answer =
-        "I couldn’t reach the AI providers just now. Here’s a concise summary from the knowledge base:\n\n" +
-        (stitched || "No KB matches found.");
+      answer = "I couldn’t reach the AI providers just now. Here’s a concise summary from the knowledge base:\n\n" + (stitched || "No KB matches found.");
       provider = "kb-fallback";
     }
 
     answer = (answer || "").trim().replace(/\n{3,}/g, "\n\n");
 
     res.writeHead(200, headers);
-    res.end(JSON.stringify({
-      answer, provider, topic, confidence, sources: ids, followups: buildFollowups(topic),
-    }));
+    res.end(JSON.stringify({ answer, provider, topic, confidence, sources: ids, followups: buildFollowups(topic) }));
   } catch (err) {
+    console.error("ai-expert error:", err);
     const msg = err?.name === "AbortError" ? "Upstream request timed out" : err?.message || "Server error";
     res.writeHead(500, headers);
     res.end(JSON.stringify({ error: msg }));
