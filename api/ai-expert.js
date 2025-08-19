@@ -19,9 +19,6 @@ function readDocsStore() {
 // BACK-END ONLY (Edge function)
 const API_BASE = process.env.API_BASE || 'https://album-ai-backend-new.vercel.app';
 
-await fetch(`${API_BASE}/api/img`, { /* ... */ });
-
-{ "src": "/api/ai-expert", "dest": "/api/ai-expert.js" }
 
 
 
