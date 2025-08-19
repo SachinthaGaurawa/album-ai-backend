@@ -1,3 +1,7 @@
+window.__API_BASE__ = 'https://album-ai-backend-new.vercel.app';
+const API_BASE = window.__API_BASE__;
+
+
 askBtn.addEventListener('click', async () => {
   const q = askInput.value.trim();
   if (!q) return;
