@@ -1,11 +1,17 @@
 {
   "version": 2,
+  "functions": {
+    "api/*.js":  { "runtime": "nodejs18.x" },
+    "api/*.cjs": { "runtime": "nodejs18.x" }
+  },
   "routes": [
-    { "src": "/api/ai",          "dest": "/api/ai.js" },
-    { "src": "/api/ai-expert",   "dest": "/api/ai-expert.js" },
-    { "src": "/api/ingest-pdf",  "dest": "/api/ingest-pdf.js" },
-    { "src": "/api/docs.json",   "dest": "/api/docs.json.js" },
-    { "src": "/api/delete-doc",  "dest": "/api/delete-doc.js" },
-    { "src": "/api/img",         "dest": "/api/img.js" }        // <-- add this if using image gen/browse
+    { "src": "/api/ai",         "dest": "/api/ai.js" },
+    { "src": "/api/ai-expert",  "dest": "/api/ai-expert.cjs" },
+    { "src": "/api/ingest-pdf", "dest": "/api/ingest-pdf.js" },
+    { "src": "/api/docs.json",  "dest": "/api/docs.json.js" },
+    { "src": "/api/delete-doc", "dest": "/api/delete-doc.js" },
+    { "src": "/api/img",        "dest": "/api/img.js" },      // ← image generate/browse
+    { "src": "/api/ask",        "dest": "/api/ask.js" },      // optional
+    { "src": "/api/ping",       "dest": "/api/ping.js" }      // optional
   ]
 }
