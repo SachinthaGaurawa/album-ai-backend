@@ -1,4 +1,8 @@
 
+window.__API_BASE__ = 'https://album-ai-backend-new.vercel.app';
+const API_BASE = window.__API_BASE__;
+
+
 // api/ai-expert.js — Text Q&A API (Node serverless)
 // Node runtime so we can use fs/path to read your PDF store.
 export const config = { runtime: "nodejs18.x" };
