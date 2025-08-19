@@ -38,14 +38,7 @@ async function readDocsStore() {
 
 
 /* ── tiny utils ─────────────────────────────────────────────── */
-function readDocsStore() {
-  try {
-    const p = path.join(process.cwd(), "storage", "docs.json");
-    return JSON.parse(fs.readFileSync(p, "utf-8"));
-  } catch {
-    return { docs: [] };
-  }
-}
+
 
 function corsHeaders(origin) {
   const ALLOWED = (process.env.CORS_ORIGINS || "")
