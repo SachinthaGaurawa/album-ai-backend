@@ -1,13 +1,3 @@
-// BACK-END ONLY (Edge function)
-const API_BASE = process.env.API_BASE || 'https://album-ai-backend-new.vercel.app';
-
-await fetch(`${API_BASE}/api/img`, { /* ... */ });
-
-{ "src": "/api/ai-expert", "dest": "/api/ai-expert.js" }
-
-
-
-
 
 // api/ai-expert.js — Edge Function (Groq → DeepInfra → Gemini) with KB + Topic-Aware Retrieval
 export const config = { runtime: 'edge' };
@@ -22,6 +12,18 @@ function readDocsStore() {
     return JSON.parse(fs.readFileSync(p, 'utf-8'));
   } catch { return { docs: [] }; }
 }
+
+
+
+
+// BACK-END ONLY (Edge function)
+const API_BASE = process.env.API_BASE || 'https://album-ai-backend-new.vercel.app';
+
+await fetch(`${API_BASE}/api/img`, { /* ... */ });
+
+{ "src": "/api/ai-expert", "dest": "/api/ai-expert.js" }
+
+
 
 
 /* ───────────────────────────── CORS ───────────────────────────── */
