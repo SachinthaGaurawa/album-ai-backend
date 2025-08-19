@@ -1,5 +1,5 @@
-
-
+//==========================================================
+//PRO AI CHAT DOCK — now with IMAGE GENERATE + BROWSE + DOWNLOAD
 
 
 
@@ -9,6 +9,21 @@ export const config = { runtime: "nodejs18.x" };
 
 import fs from "fs";
 import path from "path";
+
+// Safely read JSON for Node/Vercel (sometimes req.body isn't parsed)
+async function readJson(req) {
+  if (req.body && typeof req.body === "object") return req.body;
+  const chunks = [];
+  for await (const c of req) chunks.push(c);
+  try {
+    return JSON.parse(Buffer.concat(chunks).toString("utf-8") || "{}");
+  } catch {
+    return {};
+  }
+}
+
+
+
 
 /* ── tiny utils ─────────────────────────────────────────────── */
 function readDocsStore() {
@@ -183,38 +198,50 @@ function userPrompt(question, ctx) {
 
 /* ── HTTP handler (Node style) ──────────────────────────────── */
 export default async function handler(req, res) {
-  const origin = req.headers.origin || "*";
+  const origin  = req.headers.origin || "*";
   const headers = corsHeaders(origin);
 
   if (req.method === "OPTIONS") { res.writeHead(204, headers); res.end(); return; }
   if (req.method !== "POST")    { res.writeHead(405, headers); res.end(JSON.stringify({ error: "Only POST supported" })); return; }
 
   try {
-    const { question: rawQ } = req.body || {};
-    const question = (rawQ || "").toString().trim();
-    if (!question) { res.writeHead(400, headers); res.end(JSON.stringify({ error: "Missing question" })); return; }
+    // 🔧 NEW: robust body parsing
+    const body = await readJson(req);
+    const rawQ = (body?.question ?? body?.q ?? body?.text ?? "").toString();
+    const question = rawQ.trim();
 
-    const topic = detectTopic(question);
+    if (!question) {
+      res.writeHead(400, headers);
+      res.end(JSON.stringify({ error: "Missing question" }));
+      return;
+    }
+
+    // Build KB+PDF context
+    const topic       = detectTopic(question);
     const { ctx, ids } = buildContext(question, topic);
 
     const sys = systemPrompt(topic);
     const usr = userPrompt(question, ctx);
 
+    // Provider fallback: Groq → DeepInfra → Gemini
     let answer = "", provider = "";
     const providers = [
       { name: "groq",      fn: askGroq },
       { name: "deepinfra", fn: askDeepInfra },
       { name: "gemini",    fn: askGemini },
     ];
+
     for (const p of providers) {
       try {
         const t = withTimeout(30_000);
-        answer = await p.fn({ system: sys, user: usr, signal: t.signal });
-        t.clear(); provider = p.name;
+        answer   = await p.fn({ system: sys, user: usr, signal: t.signal });
+        t.clear();
+        provider = p.name;
         if (answer) break;
       } catch { /* try next */ }
     }
 
+    // Final fallback: stitched KB if all providers fail
     if (!answer) {
       const stitched = ids.map((id, i) => {
         const [kind, rest] = id.split(":");
@@ -229,11 +256,13 @@ export default async function handler(req, res) {
         }
         return "";
       }).filter(Boolean).join("\n\n");
-      answer = ["I couldn’t reach the AI providers just now. Here’s a concise KB summary:", "", stitched || "No KB matches found."].join("\n");
+
+      answer   = ["I couldn’t reach the AI providers just now. Here’s a concise KB summary:", "", stitched || "No KB matches found."].join("\n");
       provider = "kb-fallback";
     }
 
     answer = answer.trim().replace(/\n{3,}/g, "\n\n");
+
     res.writeHead(200, headers);
     res.end(JSON.stringify({ answer, provider, topic, sources: ids }));
   } catch (err) {
@@ -242,6 +271,7 @@ export default async function handler(req, res) {
     res.end(JSON.stringify({ error: msg }));
   }
 }
+
 
 
 
