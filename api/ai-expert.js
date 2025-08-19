@@ -1,12 +1,6 @@
-/* ==========================================================
-   PRO AI CHAT DOCK — now with IMAGE GENERATE + BROWSE + DOWNLOAD
-   ...
 
 
 
-
-window.__API_BASE__ = 'https://album-ai-backend-new.vercel.app';
-const API_BASE = window.__API_BASE__;
 
 
 // api/ai-expert.js — Text Q&A API (Node serverless)
