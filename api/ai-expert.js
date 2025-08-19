@@ -1,6 +1,11 @@
 // api/ai-expert.js — Edge Function (Groq → DeepInfra → Gemini) with KB + Topic-Aware Retrieval
 export const config = { runtime: 'edge' };
 
+
+// BACK-END ONLY (Edge function)
+const API_BASE = process.env.API_BASE || 'https://album-ai-backend-new.vercel.app';
+
+
 import fs from 'fs';
 import path from 'path';
 
