@@ -1,8 +1,6 @@
 {
   "name": "album-ai-backend",
   "private": true,
-  "version": "1.0.0",
-  "dependencies": {
-    "pdf-parse": "^1.1.1"
-  }
+  "type": "commonjs",
+  "engines": { "node": "18.x" }
 }
