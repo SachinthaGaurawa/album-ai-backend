@@ -1,14 +1,15 @@
-// api/ai-expert.js  (CommonJS version) — Text Q&A over KB + uploaded PDFs
+// ==========================================================
+// AI Expert API (CommonJS) — Friendly, KB + PDF aware, no ESM
+// Works on Vercel Node 18 without "type: module"
+// ==========================================================
 
-// Make this a Node.js function (so we can use AbortController/timeouts, etc.)
+/** Run on Node runtime (so we can use fetch, Buffer, etc.) */
 module.exports.config = { runtime: "nodejs18.x" };
 
-/* --------------------------- tiny utils --------------------------- */
+/* ---------------- utilities ---------------- */
 function corsHeaders(origin) {
   const ALLOWED = (process.env.CORS_ORIGINS || "")
-    .split(",")
-    .map(s => s.trim().replace(/\/+$/, ""))
-    .filter(Boolean);
+    .split(",").map(s => s.trim().replace(/\/+$/, "")).filter(Boolean);
   const o = (origin || "").replace(/\/+$/, "");
   const allow = !origin || ALLOWED.length === 0 || ALLOWED.includes(o);
   return {
@@ -20,16 +21,12 @@ function corsHeaders(origin) {
   };
 }
 
-// Some platforms don’t parse req.body for us — handle both cases
 async function readJson(req) {
   if (req.body && typeof req.body === "object") return req.body;
   const chunks = [];
   for await (const c of req) chunks.push(c);
-  try {
-    return JSON.parse(Buffer.concat(chunks).toString("utf-8") || "{}");
-  } catch {
-    return {};
-  }
+  try { return JSON.parse(Buffer.concat(chunks).toString("utf-8") || "{}"); }
+  catch { return {}; }
 }
 
 function withTimeout(ms = 30_000) {
@@ -45,70 +42,39 @@ const normalize = (s) =>
     .replace(/\s+/g, " ")
     .trim();
 
-/* ---------------------------- KB docs ---------------------------- */
-/* Add project/owner facts here so the assistant can answer friendly
-   questions (hello/thanks/bye/ownership/who is Sachintha, etc.)     */
+/* ---------------- KB (includes owner facts) ---------------- */
 const KB = {
   meta: { project: "Album Expert KB", version: "2025-08-19" },
   docs: [
     {
-      id: "aavss-overview",
-      topic: "aavss",
-      title: "AAVSS — Overview",
-      text:
-        "AAVSS (Advanced Autonomous Vehicle Safety System) is a real-time safety & perception stack. " +
-        "Focus: road-hazard awareness, driver alerts, research prototyping. " +
-        "Core: multi-sensor fusion (LiDAR + mmWave radar + RGB cameras). " +
-        "Target: NVIDIA Jetson (Nano-class) with TensorRT optimizations. " +
-        "Latency target: sub-100 ms end-to-end at ~10–20 FPS, sensor/model dependent.",
+      id: "aavss-overview", topic: "aavss", title: "AAVSS — Overview",
+      text: "AAVSS (Advanced Autonomous Vehicle Safety System) is a real-time safety & perception stack with multi-sensor fusion (LiDAR + mmWave radar + RGB cameras) on NVIDIA Jetson (Nano-class) with TensorRT. Latency target < ~100 ms at ~10–20 FPS (sensor/model dependent)."
     },
     {
-      id: "aavss-sensors",
-      topic: "aavss",
-      title: "AAVSS — Sensors & Roles",
-      text:
-        "LiDAR → 3D structure/range/free-space; Radar → range + radial velocity (robust in rain/fog); " +
-        "RGB Cameras → appearance: traffic lights/signs, lanes, VRUs. " +
-        "Typical placements: roof/bumper LiDAR; front/rear radar; forward camera at windshield height.",
+      id: "aavss-sensors", topic: "aavss", title: "AAVSS — Sensors & Roles",
+      text: "LiDAR → 3D structure/free-space; Radar → range + radial velocity (robust in rain/fog); RGB cameras → lanes, lights, signs, VRUs. Typical placements: roof/bumper LiDAR; front/rear radar; forward windshield camera."
     },
     {
-      id: "sld-overview",
-      topic: "sldataset",
-      title: "Sri Lanka Autonomous Driving Dataset — Overview",
-      text:
-        "Open set of Sri Lankan driving scenarios (urban & rural) across weather/time (rain, fog, night). " +
-        "Includes annotations for lanes, signs, hazards; visual examples available.",
-    },
-    /* ——— Owner / author facts you asked for ——— */
-    {
-      id: "owner",
-      topic: "all",
-      title: "Ownership & Authors",
-      text:
-        "Owner / concept lead: **Sachintha Gaurawa** (Electrical & Electronic Engineering). " +
-        "Project scope includes AAVSS and the Sri Lanka driving dataset initiative. " +
-        "If asked: the work shown on this site is owned and curated by Sachintha Gaurawa.",
+      id: "sld-overview", topic: "sldataset", title: "Sri Lanka Dataset — Overview",
+      text: "Open Sri Lankan driving scenarios (urban + rural; rain/fog/night). Includes annotations for lanes, traffic signs, and hazards. Visual examples are available."
     },
     {
-      id: "about-sachintha",
-      topic: "all",
-      title: "Who is Sachintha Gaurawa?",
-      text:
-        "Sachintha Gaurawa is the creator/maintainer of this portfolio, and the owner/concept lead " +
-        "behind AAVSS and the Sri Lankan driving dataset. Focus areas: embedded AI, sensor fusion, " +
-        "and applied perception for driver safety.",
+      id: "owner", topic: "all", title: "Ownership & Authors",
+      text: "Owner / concept lead: **Sachintha Gaurawa**. Portfolio covers AAVSS and the Sri Lankan driving dataset."
+    },
+    {
+      id: "about-sachintha", topic: "all", title: "Who is Sachintha Gaurawa?",
+      text: "Sachintha Gaurawa is the creator of this portfolio and the owner/concept lead behind AAVSS and the Sri Lankan driving dataset (embedded AI, multi-sensor fusion, applied perception)."
     },
   ],
 };
 
-/* ----------------- PDF chunk store (from /api/docs.json) ----------------- */
-// We read the docs store via HTTP so it works on Vercel (no local FS reads).
+/* ------------- read uploaded PDF chunks via /api/docs.json ------------- */
 async function readDocsStore(req) {
   try {
-    const proto = req.headers["x-forwarded-proto"] || "https";
-    const host = req.headers.host;
+    // Prefer explicit API_BASE, otherwise derive from the incoming request host
     const baseEnv = (process.env.API_BASE || "").trim().replace(/\/+$/, "");
-    const base = baseEnv || `${proto}://${host}`;
+    const base = baseEnv || `${req.headers["x-forwarded-proto"] || "https"}://${req.headers.host}`;
     const r = await fetch(`${base}/api/docs.json`, { cache: "no-store" });
     const j = await r.json();
     return j && Array.isArray(j.docs) ? { docs: j.docs } : { docs: [] };
@@ -117,66 +83,46 @@ async function readDocsStore(req) {
   }
 }
 
-/* --------------------- retrieval & ranking ---------------------- */
+/* ---------------- retrieval ---------------- */
 function detectTopic(q) {
   const n = normalize(q);
   if (/(^|\s)(aavss|fusion|radar|lidar|lane|tracking|jetson|safety|adas|tensorrt)(\s|$)/.test(n)) return "aavss";
-  if (/(^|\s)(dataset|data set|sri lanka|annotation|label|split|download|license|classes)(\s|$)/.test(n))
-    return "sldataset";
+  if (/(^|\s)(dataset|data set|sri lanka|annotation|label|split|download|license|classes)(\s|$)/.test(n)) return "sldataset";
   return "all";
 }
 
-function score(text, tokens) {
+function score(text, toks) {
   const t = normalize(text);
   let s = 0;
-  for (const tok of tokens) {
-    if (!tok) continue;
-    if (t.includes(` ${tok} `) || t.startsWith(tok + " ") || t.endsWith(" " + tok)) s += 3;
-    else if (t.includes(tok)) s += 1;
+  for (const k of toks) {
+    if (!k) continue;
+    if (t.includes(` ${k} `) || t.startsWith(k + " ") || t.endsWith(" " + k)) s += 3;
+    else if (t.includes(k)) s += 1;
   }
   return s;
 }
 
 async function topK(req, q, k = 8, topic = "all") {
-  const tokens = normalize(q).split(" ");
-
-  // 1) KB
-  const kbPool = KB.docs.filter((d) => (topic === "all" ? true : d.topic === topic || d.topic === "all"));
+  const toks = normalize(q).split(" ");
+  const kbPool = KB.docs.filter(d => topic === "all" ? true : (d.topic === topic || d.topic === "all"));
   const kbRanked = kbPool
-    .map((d) => ({
-      type: "kb",
-      id: d.id,
-      title: d.title,
-      text: d.text,
-      s: score(`${d.title} ${d.text}`, tokens),
-    }))
-    .filter((x) => x.s > 0);
+    .map(d => ({ type: "kb", id: d.id, title: d.title, text: d.text, s: score(`${d.title} ${d.text}`, toks) }))
+    .filter(x => x.s > 0);
 
-  // 2) PDF chunks
   const store = await readDocsStore(req);
   const pdfRanked = (store.docs || [])
-    .map((ch) => ({
-      type: "pdf",
-      id: ch.id,
-      title: ch.title,
-      text: ch.text,
-      page: ch.page,
-      url: ch.url,
-      s: score(`${ch.title} ${ch.text}`, tokens),
-    }))
-    .filter((x) => x.s > 0);
+    .map(ch => ({ type: "pdf", id: ch.id, title: ch.title, text: ch.text, page: ch.page, url: ch.url, s: score(`${ch.title} ${ch.text}`, toks) }))
+    .filter(x => x.s > 0);
 
   const all = kbRanked.concat(pdfRanked).sort((a, b) => b.s - a.s).slice(0, k);
 
-  // Fallback overview if we got nothing
   if (!all.length) {
-    const ids =
-      topic === "aavss"
-        ? ["aavss-overview"]
-        : topic === "sldataset"
-        ? ["sld-overview"]
-        : ["aavss-overview", "sld-overview"];
-    return KB.docs.filter((d) => ids.includes(d.id)).map((d) => ({ type: "kb", id: d.id, title: d.title, text: d.text }));
+    const ids = topic === "aavss"
+      ? ["aavss-overview"]
+      : topic === "sldataset"
+      ? ["sld-overview"]
+      : ["aavss-overview", "sld-overview"];
+    return KB.docs.filter(d => ids.includes(d.id)).map(d => ({ type: "kb", id: d.id, title: d.title, text: d.text }));
   }
   return all;
 }
@@ -184,29 +130,23 @@ async function topK(req, q, k = 8, topic = "all") {
 async function buildContext(req, q, topic = "all") {
   const items = await topK(req, q, 8, topic);
   const ctx = items.map((d, i) => `#${i + 1} ${d.title}\n${d.text}`).join("\n\n");
-  const ids = items.map((d) =>
+  const ids = items.map(d =>
     d.type === "pdf" ? `pdf:${d.id}|${d.title}|page=${d.page}|${d.url}` : `kb:${d.id}|${d.title}`
   );
   return { ctx, ids };
 }
 
-/* ---------------- AI providers (fallback chain) ---------------- */
+/* ---------------- providers ---------------- */
 async function askGroq({ system, user, signal }) {
-  const key = process.env.GROQ_API_KEY;
-  if (!key) throw new Error("GROQ_API_KEY not set");
+  const key = process.env.GROQ_API_KEY; if (!key) throw new Error("GROQ_API_KEY not set");
   const r = await fetch("https://api.groq.com/openai/v1/chat/completions", {
-    method: "POST",
-    signal,
+    method: "POST", signal,
     headers: { Authorization: `Bearer ${key}`, "Content-Type": "application/json" },
     body: JSON.stringify({
       model: "llama-3.1-70b-versatile",
-      temperature: 0.2,
-      max_tokens: 450,
-      messages: [
-        { role: "system", content: system },
-        { role: "user", content: user },
-      ],
-    }),
+      temperature: 0.2, max_tokens: 450,
+      messages: [{ role: "system", content: system }, { role: "user", content: user }]
+    })
   });
   if (!r.ok) throw new Error(`Groq HTTP ${r.status}: ${await r.text().catch(() => "")}`);
   const j = await r.json();
@@ -214,21 +154,15 @@ async function askGroq({ system, user, signal }) {
 }
 
 async function askDeepInfra({ system, user, signal }) {
-  const key = process.env.DEEPINFRA_API_KEY;
-  if (!key) throw new Error("DEEPINFRA_API_KEY not set");
+  const key = process.env.DEEPINFRA_API_KEY; if (!key) throw new Error("DEEPINFRA_API_KEY not set");
   const r = await fetch("https://api.deepinfra.com/v1/openai/chat/completions", {
-    method: "POST",
-    signal,
+    method: "POST", signal,
     headers: { Authorization: `Bearer ${key}`, "Content-Type": "application/json" },
     body: JSON.stringify({
       model: "meta-llama/Meta-Llama-3.1-8B-Instruct",
-      temperature: 0.2,
-      max_tokens: 450,
-      messages: [
-        { role: "system", content: system },
-        { role: "user", content: user },
-      ],
-    }),
+      temperature: 0.2, max_tokens: 450,
+      messages: [{ role: "system", content: system }, { role: "user", content: user }]
+    })
   });
   if (!r.ok) throw new Error(`DeepInfra HTTP ${r.status}: ${await r.text().catch(() => "")}`);
   const j = await r.json();
@@ -236,79 +170,96 @@ async function askDeepInfra({ system, user, signal }) {
 }
 
 async function askGemini({ system, user, signal }) {
-  const key = process.env.GEMINI_API_KEY;
-  if (!key) throw new Error("GEMINI_API_KEY not set");
-  const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${encodeURIComponent(
-    key
-  )}`;
+  const key = process.env.GEMINI_API_KEY; if (!key) throw new Error("GEMINI_API_KEY not set");
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${encodeURIComponent(key)}`;
   const r = await fetch(url, {
-    method: "POST",
-    signal,
-    headers: { "Content-Type": "application/json" },
+    method: "POST", signal, headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
       contents: [{ role: "user", parts: [{ text: `${system}\n\n---\n\n${user}` }] }],
-      generationConfig: { temperature: 0.2, maxOutputTokens: 450 },
-    }),
+      generationConfig: { temperature: 0.2, maxOutputTokens: 450 }
+    })
   });
   if (!r.ok) throw new Error(`Gemini HTTP ${r.status}: ${await r.text().catch(() => "")}`);
   const j = await r.json();
   const text =
-    j?.candidates?.[0]?.content?.parts?.map((p) => p?.text || "").join("").trim() ||
-    j?.candidates?.[0]?.content?.parts?.[0]?.text?.trim() ||
-    "";
+    j?.candidates?.[0]?.content?.parts?.map(p => p?.text || "").join("").trim()
+    || j?.candidates?.[0]?.content?.parts?.[0]?.text?.trim()
+    || "";
   return text;
 }
 
-/* ----------------- prompts (friendlier tone) ------------------ */
+/* ---------------- prompts & UX polish ---------------- */
+function isGreeting(q) { return /\b(hi|hello|hey|good (morning|afternoon|evening)|what'?s up)\b/i.test(q); }
+function isThanks(q)   { return /\b(thanks?|thank you|cheers)\b/i.test(q); }
+function isBye(q)      { return /\b(bye|goodbye|see you|later)\b/i.test(q); }
+
+function followUpFor(topic) {
+  if (topic === "aavss") return "Do you want a short sensor-fusion diagram or latency breakdown?";
+  if (topic === "sldataset") return "Want sample label formats or recommended train/val/test splits?";
+  return "Shall I show image examples or a quick summary of both projects?";
+}
+
 function systemPrompt(topic) {
   return [
-    "You are a warm, professional technical assistant for an album/portfolio site.",
-    "Be brief, human, and helpful. Use Markdown with short paragraphs or bullets.",
-    "Ground every answer strictly in the provided Knowledge Base (KB) context.",
-    "If the KB does not include a detail (e.g., a specific sensor SKU), say it's not specified and invite the user to add it.",
-    "If the user greets you, respond naturally first, then offer help.",
-    "When it helps, end with ONE short follow-up question to guide them. Keep it optional and not pushy.",
-    `Topic focus: ${topic}. Stay on this unless the user clearly asks to compare topics.`,
+    "You are a warm, expert assistant for an album/portfolio site.",
+    "RULES: Use ONLY the provided KB text. If a fact (e.g., exact sensor SKU) is missing, say it's not specified and invite the user to add it.",
+    "STYLE: Conversational, friendly, precise. Short Markdown paragraphs or bullets. Add tasteful emojis only when it improves clarity.",
+    "USER CARE: If appropriate, end with ONE optional follow-up question to help them go deeper.",
+    `Topic focus: ${topic}. Stick to one topic unless asked to compare.`,
   ].join(" ");
 }
 
 function userPrompt(question, ctx) {
   return [
-    "KB Context:",
+    "KB:",
     '"""',
     ctx,
     '"""',
     "",
-    `User: ${question}`,
+    `User question: ${question}`,
     "",
-    "Answer using only the KB. If unknown, say so briefly and suggest adding the info.",
-    "Be concise and conversational. Prefer concrete, actionable guidance.",
+    "Instructions:",
+    "- Answer ONLY from the KB above.",
+    "- If data is missing, say so succinctly and invite the user to provide/ingest it.",
+    "- Use bullets for lists. Keep it human and friendly.",
   ].join("\n");
 }
 
-/* ------------------------- HTTP handler ------------------------ */
+/* ---------------- HTTP handler (CommonJS) ---------------- */
 module.exports = async function handler(req, res) {
-  const origin = req.headers.origin || "*";
-  const headers = corsHeaders(origin);
+  const headers = corsHeaders(req.headers.origin || "*");
 
-  if (req.method === "OPTIONS") {
-    res.writeHead(204, headers);
-    res.end();
-    return;
-  }
-  if (req.method !== "POST") {
-    res.writeHead(405, headers);
-    res.end(JSON.stringify({ error: "Only POST supported" }));
-    return;
-  }
+  if (req.method === "OPTIONS") { res.writeHead(204, headers); res.end(); return; }
+  if (req.method !== "POST")    { res.writeHead(405, headers); res.end(JSON.stringify({ error: "Only POST supported" })); return; }
 
   try {
     const body = await readJson(req);
-    const rawQ = (body?.question ?? body?.q ?? body?.text ?? "").toString();
-    const question = rawQ.trim();
+    const question = String(body?.question ?? body?.q ?? body?.text ?? "").trim();
+
     if (!question) {
       res.writeHead(400, headers);
       res.end(JSON.stringify({ error: "Missing question" }));
+      return;
+    }
+
+    // Soft UX responses for small talk
+    if (isGreeting(question)) {
+      const tip = followUpFor("all");
+      const ans = `Hey! 😊 I’m your friendly assistant for AAVSS and the Sri Lankan Driving Dataset. Ask me anything.\n\n*Tip:* ${tip}`;
+      res.writeHead(200, headers);
+      res.end(JSON.stringify({ answer: ans, provider: "ux", topic: "all", sources: [] }));
+      return;
+    }
+    if (isThanks(question)) {
+      const ans = "You’re welcome! If you’d like, I can show a mini summary or browse reference images.";
+      res.writeHead(200, headers);
+      res.end(JSON.stringify({ answer: ans, provider: "ux", topic: "all", sources: [] }));
+      return;
+    }
+    if (isBye(question)) {
+      const ans = "Goodbye! 👋 If you come back later, I can pick up from where you left off.";
+      res.writeHead(200, headers);
+      res.end(JSON.stringify({ answer: ans, provider: "ux", topic: "all", sources: [] }));
       return;
     }
 
@@ -318,58 +269,51 @@ module.exports = async function handler(req, res) {
     const sys = systemPrompt(topic);
     const usr = userPrompt(question, ctx);
 
-    let answer = "",
-      provider = "";
-    const providers = [
+    // Provider fallback: Groq → DeepInfra → Gemini
+    let answer = "", provider = "";
+    const chain = [
       { name: "groq", fn: askGroq },
       { name: "deepinfra", fn: askDeepInfra },
       { name: "gemini", fn: askGemini },
     ];
 
-    for (const p of providers) {
+    for (const p of chain) {
       try {
         const t = withTimeout(30_000);
-        answer = await p.fn({ system: sys, user: usr, signal: t.signal });
+        const out = await p.fn({ system: sys, user: usr, signal: t.signal });
         t.clear();
-        provider = p.name;
-        if (answer) break;
-      } catch {
-        /* try next */
-      }
+        if (out && out.trim()) { answer = out.trim(); provider = p.name; break; }
+      } catch { /* try next */ }
     }
 
+    // Final fallback: stitched KB if all providers fail
     if (!answer) {
-      // KB-only stitched fallback so the user still gets something useful
-      const stitched = ids
-        .map((id, i) => {
-          const [kind, rest] = id.split(":");
-          if (kind === "kb") {
-            const kbId = rest.split("|")[0];
-            const d = KB.docs.find((x) => x.id === kbId);
-            return d ? `(${i + 1}) ${d.title}\n${d.text}` : "";
-          }
-          if (kind === "pdf") {
-            const title = rest.split("|")[0];
-            return `(${i + 1}) ${title} (from PDF)`;
-          }
-          return "";
-        })
-        .filter(Boolean)
-        .join("\n\n");
+      const stitched = ids.map((id, i) => {
+        const [kind, rest] = id.split(":");
+        if (kind === "kb") {
+          const kbId = rest.split("|")[0];
+          const d = KB.docs.find(x => x.id === kbId);
+          return d ? `(${i + 1}) ${d.title}\n${d.text}` : "";
+        }
+        if (kind === "pdf") {
+          const title = rest.split("|")[0];
+          return `(${i + 1}) ${title} (from PDF)`;
+        }
+        return "";
+      }).filter(Boolean).join("\n\n");
 
-      answer = [
-        "I couldn’t reach the AI providers just now. Here’s a concise KB summary:",
-        "",
-        stitched || "No KB matches found.",
-      ].join("\n");
+      answer   = `I couldn’t reach the AI providers just now. Here’s a brief KB digest:\n\n${stitched || "No KB matches found."}`;
       provider = "kb-fallback";
     }
 
-    answer = answer.trim().replace(/\n{3,}/g, "\n\n");
+    // Add a friendly, single follow-up question when helpful
+    const follow = followUpFor(topic);
+    const politeAns = `${String(answer).trim().replace(/\n{3,}/g, "\n\n")}\n\n*Would you like more?* ${follow}`;
+
     res.writeHead(200, headers);
-    res.end(JSON.stringify({ answer, provider, topic, sources: ids }));
+    res.end(JSON.stringify({ answer: politeAns, provider, topic, sources: ids }));
   } catch (err) {
-    const msg = err?.name === "AbortError" ? "Upstream request timed out" : err?.message || "Server error";
+    const msg = err?.name === "AbortError" ? "Upstream request timed out" : (err?.message || "Server error");
     res.writeHead(500, headers);
     res.end(JSON.stringify({ error: msg }));
   }
