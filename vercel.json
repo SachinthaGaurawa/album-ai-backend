@@ -3,6 +3,7 @@
   "routes": [
     { "src": "/api/ai",          "dest": "/api/ai.js" },
     { "src": "/api/ingest-pdf",  "dest": "/api/ingest-pdf.js" },
-    { "src": "/api/ping",        "dest": "/api/ping.js" }
+    { "src": "/api/ping",        "dest": "/api/ping.js" },
+    { "src": "/api/ai-expert",   "dest": "/api/ai-expert.js" }
   ]
 }
