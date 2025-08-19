@@ -1,15 +1,18 @@
 // ==========================================================
-// AI Expert API (CommonJS) — Friendly, KB + PDF aware, no ESM
-// Works on Vercel Node 18 without "type: module"
+// /api/ai-expert.js  — Text Q&A API (CommonJS for Vercel)
+// RAG (KB + PDFs), skills plugin system, small-talk,
+// follow-ups, command routing (/gen, /browse), provider fallback
 // ==========================================================
 
-/** Run on Node runtime (so we can use fetch, Buffer, etc.) */
-module.exports.config = { runtime: "nodejs18.x" };
+exports.config = { runtime: "nodejs18.x" };
 
-/* ---------------- utilities ---------------- */
+/* ----------------------- tiny utils ---------------------- */
+
 function corsHeaders(origin) {
   const ALLOWED = (process.env.CORS_ORIGINS || "")
-    .split(",").map(s => s.trim().replace(/\/+$/, "")).filter(Boolean);
+    .split(",")
+    .map((s) => s.trim().replace(/\/+$/, ""))
+    .filter(Boolean);
   const o = (origin || "").replace(/\/+$/, "");
   const allow = !origin || ALLOWED.length === 0 || ALLOWED.includes(o);
   return {
@@ -38,105 +41,152 @@ function withTimeout(ms = 30_000) {
 const normalize = (s) =>
   (s || "")
     .toLowerCase()
+    .replace(/[“”]/g, '"')
+    .replace(/[‘’]/g, "'")
     .replace(/[^a-z0-9\s\-_/.:]/g, " ")
     .replace(/\s+/g, " ")
     .trim();
 
-/* ---------------- KB (includes owner facts) ---------------- */
+const TOK = (s) => normalize(s).split(" ").filter(Boolean);
+
+/* ----------------------- personal facts ------------------ */
+
+const OWNER = {
+  fullName: "Sachintha Gaurawa",
+  roles: ["Owner", "Concept designer", "Manufacturer"],
+  projects: [
+    "AAVSS (Advanced Autonomous Vehicle Safety System)",
+    "Sri Lanka Autonomous Driving Dataset",
+  ],
+  tagline:
+    "Engineer and creator focused on autonomous driving, embedded AI, and safety systems.",
+};
+
+/* ----------------------- built-in KB --------------------- */
+
 const KB = {
-  meta: { project: "Album Expert KB", version: "2025-08-19" },
+  meta: { project: "Album Expert KB", version: "2025-08-19", topics: ["aavss", "sldataset", "about"] },
   docs: [
     {
-      id: "aavss-overview", topic: "aavss", title: "AAVSS — Overview",
-      text: "AAVSS (Advanced Autonomous Vehicle Safety System) is a real-time safety & perception stack with multi-sensor fusion (LiDAR + mmWave radar + RGB cameras) on NVIDIA Jetson (Nano-class) with TensorRT. Latency target < ~100 ms at ~10–20 FPS (sensor/model dependent)."
+      id: "aavss-overview",
+      topic: "aavss",
+      title: "AAVSS — Overview",
+      text:
+        "AAVSS (Advanced Autonomous Vehicle Safety System) is a real-time safety and perception stack. " +
+        "Core: multi-sensor fusion (LiDAR + mmWave radar + RGB camera). " +
+        "Embedded target: NVIDIA Jetson (Nano-class) with TensorRT optimizations. " +
+        "Typical end-to-end latency sub-100 ms at 10–20 FPS depending on model sizes.",
     },
     {
-      id: "aavss-sensors", topic: "aavss", title: "AAVSS — Sensors & Roles",
-      text: "LiDAR → 3D structure/free-space; Radar → range + radial velocity (robust in rain/fog); RGB cameras → lanes, lights, signs, VRUs. Typical placements: roof/bumper LiDAR; front/rear radar; forward windshield camera."
+      id: "aavss-sensors",
+      topic: "aavss",
+      title: "AAVSS — Sensors & Roles",
+      text:
+        "Roles:\n" +
+        "• LiDAR → 3D structure, obstacle shape, drivable free-space.\n" +
+        "• mmWave radar → range + radial velocity, robust in rain/fog, complements vision.\n" +
+        "• RGB camera → traffic lights/signs, lane markings, and VRU detection.\n" +
+        "Exact SKUs vary; add sensor models to docs.json or a PDF for precise answers.",
     },
     {
-      id: "sld-overview", topic: "sldataset", title: "Sri Lanka Dataset — Overview",
-      text: "Open Sri Lankan driving scenarios (urban + rural; rain/fog/night). Includes annotations for lanes, traffic signs, and hazards. Visual examples are available."
+      id: "aavss-pipeline",
+      topic: "aavss",
+      title: "AAVSS — Fusion Pipeline (high level)",
+      text:
+        "Calibration → time-sync → per-sensor detection/feature extraction → object association " +
+        "→ tracking → risk scoring/alerting. Safety analytics delivered via HUD/alerts.",
     },
     {
-      id: "owner", topic: "all", title: "Ownership & Authors",
-      text: "Owner / concept lead: **Sachintha Gaurawa**. Portfolio covers AAVSS and the Sri Lankan driving dataset."
+      id: "sld-overview",
+      topic: "sldataset",
+      title: "Sri Lanka Autonomous Driving Dataset — Overview",
+      text:
+        "Open driving dataset across Sri Lankan road scenarios (urban/rural; rain, fog, night). " +
+        "Includes annotations for lanes, signs, and hazards. Add PDFs for specifics.",
     },
     {
-      id: "about-sachintha", topic: "all", title: "Who is Sachintha Gaurawa?",
-      text: "Sachintha Gaurawa is the creator of this portfolio and the owner/concept lead behind AAVSS and the Sri Lankan driving dataset (embedded AI, multi-sensor fusion, applied perception)."
+      id: "about-owner",
+      topic: "about",
+      title: "Ownership & Concept",
+      text:
+        `Owner/Concept/Manufacturer: ${OWNER.fullName}. Roles: ${OWNER.roles.join(", ")}. ` +
+        `Projects: ${OWNER.projects.join(", ")}.`,
+    },
+    {
+      id: "about-whois",
+      topic: "about",
+      title: `Who is ${OWNER.fullName}?`,
+      text: `${OWNER.fullName} — ${OWNER.tagline} Leads AAVSS & the Sri Lanka dataset.`,
     },
   ],
 };
 
-/* ------------- read uploaded PDF chunks via /api/docs.json ------------- */
-async function readDocsStore(req) {
+/* -------------------- docs.json (PDF chunks) --------------- */
+
+async function readDocsStore() {
   try {
-    // Prefer explicit API_BASE, otherwise derive from the incoming request host
-    const baseEnv = (process.env.API_BASE || "").trim().replace(/\/+$/, "");
-    const base = baseEnv || `${req.headers["x-forwarded-proto"] || "https"}://${req.headers.host}`;
-    const r = await fetch(`${base}/api/docs.json`, { cache: "no-store" });
+    const base = process.env.API_BASE || "https://album-ai-backend-new.vercel.app";
+    const r = await fetch(`${base.replace(/\/+$/, "")}/api/docs.json`, { method: "GET" });
     const j = await r.json();
     return j && Array.isArray(j.docs) ? { docs: j.docs } : { docs: [] };
-  } catch {
-    return { docs: [] };
-  }
+  } catch { return { docs: [] }; }
 }
 
-/* ---------------- retrieval ---------------- */
-function detectTopic(q) {
-  const n = normalize(q);
-  if (/(^|\s)(aavss|fusion|radar|lidar|lane|tracking|jetson|safety|adas|tensorrt)(\s|$)/.test(n)) return "aavss";
-  if (/(^|\s)(dataset|data set|sri lanka|annotation|label|split|download|license|classes)(\s|$)/.test(n)) return "sldataset";
-  return "all";
-}
+/* ----------------- retrieval & context --------------------- */
 
-function score(text, toks) {
+function scoreText(qTokens, text) {
   const t = normalize(text);
   let s = 0;
-  for (const k of toks) {
-    if (!k) continue;
-    if (t.includes(` ${k} `) || t.startsWith(k + " ") || t.endsWith(" " + k)) s += 3;
-    else if (t.includes(k)) s += 1;
+  for (const tok of qTokens) {
+    if (!tok) continue;
+    if (t.includes(` ${tok} `) || t.startsWith(tok + " ") || t.endsWith(" " + tok)) s += 3;
+    else if (t.includes(tok)) s += 1;
   }
   return s;
 }
 
-async function topK(req, q, k = 8, topic = "all") {
-  const toks = normalize(q).split(" ");
-  const kbPool = KB.docs.filter(d => topic === "all" ? true : (d.topic === topic || d.topic === "all"));
-  const kbRanked = kbPool
-    .map(d => ({ type: "kb", id: d.id, title: d.title, text: d.text, s: score(`${d.title} ${d.text}`, toks) }))
-    .filter(x => x.s > 0);
+function detectTopic(question) {
+  const n = normalize(question);
+  if (/(^|\s)(aavss|fusion|radar|lidar|jetson|adas|safety|tensorrt|hud|driver monitoring)(\s|$)/.test(n)) return "aavss";
+  if (/(^|\s)(dataset|data set|sri lanka|annotation|label|split|download|license|classes|night driving)(\s|$)/.test(n)) return "sldataset";
+  if (/(^|\s)(owner|manufactur|concept|who (is|are)|about|sachintha)(\s|$)/.test(n)) return "about";
+  return "all";
+}
 
-  const store = await readDocsStore(req);
+async function topK(question, k = 8, topic = "all") {
+  const qTok = TOK(question);
+
+  const kbPool = topic === "all" ? KB.docs : KB.docs.filter((d) => d.topic === topic || d.topic === "all" || topic === "about");
+  const kbRanked = kbPool
+    .map((d) => ({ type: "kb", id: d.id, title: d.title, text: d.text, s: scoreText(qTok, `${d.title}\n${d.text}`) }))
+    .filter((x) => x.s > 0);
+
+  const store = await readDocsStore();
   const pdfRanked = (store.docs || [])
-    .map(ch => ({ type: "pdf", id: ch.id, title: ch.title, text: ch.text, page: ch.page, url: ch.url, s: score(`${ch.title} ${ch.text}`, toks) }))
-    .filter(x => x.s > 0);
+    .map((ch) => ({ type: "pdf", id: ch.id, title: ch.title, text: ch.text, page: ch.page, url: ch.url, s: scoreText(qTok, `${ch.title}\n${ch.text}`) }))
+    .filter((x) => x.s > 0);
 
   const all = kbRanked.concat(pdfRanked).sort((a, b) => b.s - a.s).slice(0, k);
 
   if (!all.length) {
-    const ids = topic === "aavss"
-      ? ["aavss-overview"]
-      : topic === "sldataset"
-      ? ["sld-overview"]
-      : ["aavss-overview", "sld-overview"];
-    return KB.docs.filter(d => ids.includes(d.id)).map(d => ({ type: "kb", id: d.id, title: d.title, text: d.text }));
+    if (topic === "aavss")     return KB.docs.filter((d) => d.id === "aavss-overview").map((d) => ({ type: "kb", ...d, s: 1 }));
+    if (topic === "sldataset") return KB.docs.filter((d) => d.id === "sld-overview").map((d) => ({ type: "kb", ...d, s: 1 }));
+    if (topic === "about")     return KB.docs.filter((d) => d.id === "about-owner").map((d) => ({ type: "kb", ...d, s: 1 }));
   }
   return all;
 }
 
-async function buildContext(req, q, topic = "all") {
-  const items = await topK(req, q, 8, topic);
-  const ctx = items.map((d, i) => `#${i + 1} ${d.title}\n${d.text}`).join("\n\n");
-  const ids = items.map(d =>
-    d.type === "pdf" ? `pdf:${d.id}|${d.title}|page=${d.page}|${d.url}` : `kb:${d.id}|${d.title}`
-  );
-  return { ctx, ids };
+async function buildContext(question, topic) {
+  const ranked = await topK(question, 8, topic);
+  const ctx = ranked.map((d, i) => `#${i + 1} ${d.title}\n${d.text}`).join("\n\n");
+  const ids = ranked.map((d) => (d.type === "pdf" ? `pdf:${d.id}|${d.title}|page=${d.page}|${d.url}` : `kb:${d.id}|${d.title}`));
+  const maxUnit = Math.max(...ranked.map((r) => r.s), 1);
+  const confidence = Math.min(1, ranked.length ? ranked.reduce((a, r) => a + r.s / maxUnit, 0) / ranked.length : 0);
+  return { ctx, ids, confidence };
 }
 
-/* ---------------- providers ---------------- */
+/* ------------------------ providers ----------------------- */
+
 async function askGroq({ system, user, signal }) {
   const key = process.env.GROQ_API_KEY; if (!key) throw new Error("GROQ_API_KEY not set");
   const r = await fetch("https://api.groq.com/openai/v1/chat/completions", {
@@ -145,12 +195,11 @@ async function askGroq({ system, user, signal }) {
     body: JSON.stringify({
       model: "llama-3.1-70b-versatile",
       temperature: 0.2, max_tokens: 450,
-      messages: [{ role: "system", content: system }, { role: "user", content: user }]
-    })
+      messages: [{ role: "system", content: system }, { role: "user", content: user }],
+    }),
   });
-  if (!r.ok) throw new Error(`Groq HTTP ${r.status}: ${await r.text().catch(() => "")}`);
-  const j = await r.json();
-  return (j?.choices?.[0]?.message?.content ?? "").trim();
+  if (!r.ok) throw new Error(`Groq HTTP ${r.status}`);
+  const j = await r.json(); return (j?.choices?.[0]?.message?.content ?? "").trim();
 }
 
 async function askDeepInfra({ system, user, signal }) {
@@ -161,12 +210,11 @@ async function askDeepInfra({ system, user, signal }) {
     body: JSON.stringify({
       model: "meta-llama/Meta-Llama-3.1-8B-Instruct",
       temperature: 0.2, max_tokens: 450,
-      messages: [{ role: "system", content: system }, { role: "user", content: user }]
-    })
+      messages: [{ role: "system", content: system }, { role: "user", content: user }],
+    }),
   });
-  if (!r.ok) throw new Error(`DeepInfra HTTP ${r.status}: ${await r.text().catch(() => "")}`);
-  const j = await r.json();
-  return (j?.choices?.[0]?.message?.content ?? "").trim();
+  if (!r.ok) throw new Error(`DeepInfra HTTP ${r.status}`);
+  const j = await r.json(); return (j?.choices?.[0]?.message?.content ?? "").trim();
 }
 
 async function askGemini({ system, user, signal }) {
@@ -176,123 +224,147 @@ async function askGemini({ system, user, signal }) {
     method: "POST", signal, headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
       contents: [{ role: "user", parts: [{ text: `${system}\n\n---\n\n${user}` }] }],
-      generationConfig: { temperature: 0.2, maxOutputTokens: 450 }
-    })
+      generationConfig: { temperature: 0.2, maxOutputTokens: 450 },
+    }),
   });
-  if (!r.ok) throw new Error(`Gemini HTTP ${r.status}: ${await r.text().catch(() => "")}`);
+  if (!r.ok) throw new Error(`Gemini HTTP ${r.status}`);
   const j = await r.json();
-  const text =
-    j?.candidates?.[0]?.content?.parts?.map(p => p?.text || "").join("").trim()
-    || j?.candidates?.[0]?.content?.parts?.[0]?.text?.trim()
-    || "";
+  const text = j?.candidates?.[0]?.content?.parts?.map((p) => p?.text || "").join("").trim()
+            || j?.candidates?.[0]?.content?.parts?.[0]?.text?.trim() || "";
   return text;
 }
 
-/* ---------------- prompts & UX polish ---------------- */
-function isGreeting(q) { return /\b(hi|hello|hey|good (morning|afternoon|evening)|what'?s up)\b/i.test(q); }
-function isThanks(q)   { return /\b(thanks?|thank you|cheers)\b/i.test(q); }
-function isBye(q)      { return /\b(bye|goodbye|see you|later)\b/i.test(q); }
-
-function followUpFor(topic) {
-  if (topic === "aavss") return "Do you want a short sensor-fusion diagram or latency breakdown?";
-  if (topic === "sldataset") return "Want sample label formats or recommended train/val/test splits?";
-  return "Shall I show image examples or a quick summary of both projects?";
-}
+/* ---------------------- prompting ------------------------- */
 
 function systemPrompt(topic) {
   return [
-    "You are a warm, expert assistant for an album/portfolio site.",
-    "RULES: Use ONLY the provided KB text. If a fact (e.g., exact sensor SKU) is missing, say it's not specified and invite the user to add it.",
-    "STYLE: Conversational, friendly, precise. Short Markdown paragraphs or bullets. Add tasteful emojis only when it improves clarity.",
-    "USER CARE: If appropriate, end with ONE optional follow-up question to help them go deeper.",
-    `Topic focus: ${topic}. Stick to one topic unless asked to compare.`,
+    "You are a warm, helpful technical assistant for an album/portfolio site.",
+    "Respond ONLY with facts found in the provided Knowledge Base (KB) below.",
+    "If something isn't in the KB, say so briefly and invite the user to provide/ingest a PDF.",
+    "Prefer short paragraphs and bullets. Use **bold** for key terms. Include friendly emojis sparingly.",
+    `Topic focus: ${topic}. Stay on one topic unless the user asks to compare.`,
+    "Offer 2–4 smart follow-up questions.",
   ].join(" ");
 }
 
 function userPrompt(question, ctx) {
   return [
     "KB:",
-    '"""',
-    ctx,
-    '"""',
-    "",
-    `User question: ${question}`,
-    "",
+    '"""', ctx || "NO CONTEXT", '"""', "",
+    `User question: ${question}`, "",
     "Instructions:",
-    "- Answer ONLY from the KB above.",
-    "- If data is missing, say so succinctly and invite the user to provide/ingest it.",
-    "- Use bullets for lists. Keep it human and friendly.",
+    "- Use only KB facts. Do not invent specifics.",
+    "- If unknown, say it's unspecified and suggest uploading/adding the detail.",
+    "- Provide clear, practical guidance. Bullets preferred.",
   ].join("\n");
 }
 
-/* ---------------- HTTP handler (CommonJS) ---------------- */
+/* -------------------- skills (feature engine) -------------- */
+
+const { matchSkill, buildSkillPrompt, detectCommand, SKILL_META } = require("./skills");
+
+/* ----------------------- small talk ------------------------ */
+
+function smallTalk(question) {
+  const q = normalize(question);
+  if (/^(hi|hey|hello|ayubowan|good (morning|evening|afternoon))\b/.test(q))
+    return { type: "greet", reply:
+      `Hi there! I'm your assistant 🤝  Ask about **AAVSS**, the **Sri Lanka dataset**, or upload a PDF for deeper answers.\n` +
+      `I can also **generate images** (/gen …) or **browse references** (/browse …). What shall we do first?` };
+  if (/^(thanks|thank you|cheers|appreciate)/.test(q))
+    return { type: "thanks", reply: "You’re welcome! 😊  Want me to summarize something next?" };
+  if (/^(bye|goodbye|see you|catch you)/.test(q))
+    return { type: "bye", reply: "Goodbye! 👋 If you need me again, just open the assistant." };
+  return null;
+}
+
+/* -------------------- HTTP handler (CJS) -------------------- */
+
 module.exports = async function handler(req, res) {
-  const headers = corsHeaders(req.headers.origin || "*");
+  const origin = req.headers.origin || "*";
+  const headers = corsHeaders(origin);
 
   if (req.method === "OPTIONS") { res.writeHead(204, headers); res.end(); return; }
   if (req.method !== "POST")    { res.writeHead(405, headers); res.end(JSON.stringify({ error: "Only POST supported" })); return; }
 
   try {
     const body = await readJson(req);
-    const question = String(body?.question ?? body?.q ?? body?.text ?? "").trim();
+    const rawQ = (body?.question ?? body?.q ?? body?.text ?? "").toString();
+    const question = rawQ.trim();
 
-    if (!question) {
-      res.writeHead(400, headers);
-      res.end(JSON.stringify({ error: "Missing question" }));
-      return;
-    }
+    if (!question) { res.writeHead(400, headers); res.end(JSON.stringify({ error: "Missing question" })); return; }
 
-    // Soft UX responses for small talk
-    if (isGreeting(question)) {
-      const tip = followUpFor("all");
-      const ans = `Hey! 😊 I’m your friendly assistant for AAVSS and the Sri Lankan Driving Dataset. Ask me anything.\n\n*Tip:* ${tip}`;
+    // Slash commands → let UI handle image gen / browse
+    const cmd = detectCommand(question);
+    if (cmd) {
       res.writeHead(200, headers);
-      res.end(JSON.stringify({ answer: ans, provider: "ux", topic: "all", sources: [] }));
-      return;
-    }
-    if (isThanks(question)) {
-      const ans = "You’re welcome! If you’d like, I can show a mini summary or browse reference images.";
-      res.writeHead(200, headers);
-      res.end(JSON.stringify({ answer: ans, provider: "ux", topic: "all", sources: [] }));
-      return;
-    }
-    if (isBye(question)) {
-      const ans = "Goodbye! 👋 If you come back later, I can pick up from where you left off.";
-      res.writeHead(200, headers);
-      res.end(JSON.stringify({ answer: ans, provider: "ux", topic: "all", sources: [] }));
+      res.end(JSON.stringify({
+        answer: cmd.kind === "gen"
+          ? `Preparing to generate images for: **${cmd.prompt}**`
+          : `Searching images for: **${cmd.query}**`,
+        intent: cmd.kind === "gen" ? "image_generate" : "image_browse",
+        payload: cmd,
+        provider: "command",
+        topic: "general",
+        sources: [],
+        followups: cmd.kind === "gen"
+          ? ["Want a cinematic or studio style?", "Change aspect ratio (1:1, 16:9, 9:16)?"]
+          : ["Filter to night/rain?", "Limit to Sri Lanka?"],
+      }));
       return;
     }
 
+    // Small talk
+    const st = smallTalk(question);
+    if (st) {
+      res.writeHead(200, headers);
+      res.end(JSON.stringify({ answer: st.reply, provider: "smalltalk", topic: "general", sources: [], followups: ["Ask about AAVSS", "Ask about the Dataset", "Generate an image (/gen …)"] }));
+      return;
+    }
+
+    // Retrieval
     const topic = detectTopic(question);
-    const { ctx, ids } = await buildContext(req, question, topic);
+    const { ctx, ids, confidence } = await buildContext(question, topic);
 
-    const sys = systemPrompt(topic);
-    const usr = userPrompt(question, ctx);
-
-    // Provider fallback: Groq → DeepInfra → Gemini
-    let answer = "", provider = "";
-    const chain = [
-      { name: "groq", fn: askGroq },
-      { name: "deepinfra", fn: askDeepInfra },
-      { name: "gemini", fn: askGemini },
-    ];
-
-    for (const p of chain) {
-      try {
-        const t = withTimeout(30_000);
-        const out = await p.fn({ system: sys, user: usr, signal: t.signal });
-        t.clear();
-        if (out && out.trim()) { answer = out.trim(); provider = p.name; break; }
-      } catch { /* try next */ }
+    if (!ctx || ctx.length < 20 || confidence < 0.15) {
+      const choices = [
+        { id: "aavss", label: "AAVSS (vehicle safety system)" },
+        { id: "sldataset", label: "Sri Lankan Driving Dataset" },
+        { id: "about", label: "About/Ownership" },
+      ];
+      res.writeHead(200, headers);
+      res.end(JSON.stringify({
+        answer: "I can help best if I know the topic. Which would you like to talk about? (AAVSS, Dataset, or About) 🙂",
+        provider: "clarify", topic: "general", sources: [], followups: choices.map((c)=>`Switch to ${c.label}?`), choices
+      }));
+      return;
     }
 
-    // Final fallback: stitched KB if all providers fail
+    // Skill matching
+    const skill = matchSkill(question);
+    const sys = systemPrompt(topic);
+    const usr = skill
+      ? buildSkillPrompt({ question, ctx, topic, owner: OWNER, skill })
+      : userPrompt(question, ctx);
+
+    // Provider cascade
+    let answer = "", provider = "";
+    const providers = [];
+    if (process.env.GROQ_API_KEY)       providers.push({ name: "groq",      fn: askGroq });
+    if (process.env.DEEPINFRA_API_KEY)  providers.push({ name: "deepinfra", fn: askDeepInfra });
+    if (process.env.GEMINI_API_KEY)     providers.push({ name: "gemini",    fn: askGemini });
+
+    for (const p of providers) {
+      try { const t = withTimeout(30_000); answer = await p.fn({ system: sys, user: usr, signal: t.signal }); t.clear(); if (answer) { provider = p.name; break; } }
+      catch { /* try next */ }
+    }
+
     if (!answer) {
       const stitched = ids.map((id, i) => {
         const [kind, rest] = id.split(":");
         if (kind === "kb") {
           const kbId = rest.split("|")[0];
-          const d = KB.docs.find(x => x.id === kbId);
+          const d = KB.docs.find((x) => x.id === kbId);
           return d ? `(${i + 1}) ${d.title}\n${d.text}` : "";
         }
         if (kind === "pdf") {
@@ -302,18 +374,20 @@ module.exports = async function handler(req, res) {
         return "";
       }).filter(Boolean).join("\n\n");
 
-      answer   = `I couldn’t reach the AI providers just now. Here’s a brief KB digest:\n\n${stitched || "No KB matches found."}`;
+      answer = "I couldn’t reach the AI providers just now. Here’s a concise KB summary:\n\n" + (stitched || "No KB matches found.");
       provider = "kb-fallback";
     }
 
-    // Add a friendly, single follow-up question when helpful
-    const follow = followUpFor(topic);
-    const politeAns = `${String(answer).trim().replace(/\n{3,}/g, "\n\n")}\n\n*Would you like more?* ${follow}`;
+    answer = (answer || "").trim().replace(/\n{3,}/g, "\n\n");
 
     res.writeHead(200, headers);
-    res.end(JSON.stringify({ answer: politeAns, provider, topic, sources: ids }));
+    res.end(JSON.stringify({
+      answer, provider, topic, confidence, sources: ids,
+      followups: SKILL_META.followups(topic),
+      skill: skill ? skill.id : null
+    }));
   } catch (err) {
-    const msg = err?.name === "AbortError" ? "Upstream request timed out" : (err?.message || "Server error");
+    const msg = err?.name === "AbortError" ? "Upstream request timed out" : err?.message || "Server error";
     res.writeHead(500, headers);
     res.end(JSON.stringify({ error: msg }));
   }
