@@ -1,5 +1,5 @@
 //==========================================================
-// PRO AI CHAT DOCK — Text Q&A API (Node serverless)
+// PRO AI CHAT — Text Q&A API (Node serverless)
 // - Uses KB + dynamic PDF chunks from /api/docs.json
 // - Provider fallback: Groq → DeepInfra → Gemini
 // - Friendly small-talk, clarifications, follow-ups
@@ -7,14 +7,14 @@
 
 export const config = { runtime: "nodejs18.x" };
 
-import fs from "fs";    // kept (Vercel allows imports; we don't use fs here)
-import path from "path"; // kept for compatibility
+import fs from "fs";     // kept for compatibility (not used)
+import path from "path";  // kept for compatibility (not used)
 
 /* ──────────────────────────────────────────────────────────
    Helpers
    ────────────────────────────────────────────────────────── */
 
-// Robust JSON body read (some serverless envs don't parse req.body)
+// Robust JSON body parse (serverless-safe)
 async function readJson(req) {
   if (req.body && typeof req.body === "object") return req.body;
   const chunks = [];
@@ -26,11 +26,12 @@ async function readJson(req) {
   }
 }
 
-// Read docs.json via API (Vercel-friendly; no ephemeral FS)
+// REPLACEMENT: Read docs.json via API (Vercel-friendly; no ephemeral FS)
 async function readDocsStore() {
   try {
+    // Same project route; ai-expert will fetch the JSON that /api/docs.json serves
     const base = process.env.API_BASE || "https://album-ai-backend-new.vercel.app";
-    const r = await fetch(`${base.replace(/\/+$/, "")}/api/docs.json`, { method: "GET" });
+    const r = await fetch(`${base.replace(/\/+$/,'')}/api/docs.json`);
     const j = await r.json();
     return j && Array.isArray(j.docs) ? { docs: j.docs } : { docs: [] };
   } catch {
@@ -65,7 +66,7 @@ const normalize = s =>
     .trim();
 
 /* ──────────────────────────────────────────────────────────
-   Knowledge Base (static starter facts you already had)
+   Knowledge Base
    ────────────────────────────────────────────────────────── */
 const KB = {
   meta: { project: "Album Expert KB", version: "2025-08-13", topics: ["aavss", "sldataset"] },
@@ -84,7 +85,7 @@ const KB = {
       + "Typical placements: roof/bumper LiDAR; front/rear radar; forward camera at windshield height.\n"
       + "Note: exact sensor brands/models are project-dependent; provide your SKUs here if you want the bot to name them."
     },
-    // (You can extend KB.docs here as before)
+    // Add any other KB docs you already had here
   ],
 };
 
@@ -217,10 +218,8 @@ async function askGemini({ system, user, signal }) {
 }
 
 /* ──────────────────────────────────────────────────────────
-   Persona, prompts, and friendliness
+   Persona, prompts, friendliness, follow-ups
    ────────────────────────────────────────────────────────── */
-
-// These are used by small-talk and “about owner” questions as well.
 const BRAND = {
   ownerName: "Sachintha Gaurawa",
   ownerShort: "Sachintha",
@@ -257,12 +256,10 @@ function smallTalkAnswer(q) {
     const a = SMALLTALK.howAreYou[ Math.floor(Math.random()*SMALLTALK.howAreYou.length) ];
     return `${a}`;
   }
-  // generic friendly fallback
   return "Hi! 👋 What would you like to explore — AAVSS, the Sri Lankan dataset, or should I generate some images?";
 }
 
 function aboutOwnerAnswer() {
-  // Keep this factual and friendly (you can extend as needed)
   return [
     `**${BRAND.ownerName}** is the creator and driving force behind **${BRAND.productName}** — concept, design, and implementation.`,
     "This project showcases autonomous-vehicle safety R&D (AAVSS) and a Sri Lankan driving dataset with rich scenarios.",
@@ -271,7 +268,6 @@ function aboutOwnerAnswer() {
 }
 
 function followupsFor(topic) {
-  // Compact, actionable suggestions the UI can render as chips
   if (topic === "aavss") {
     return [
       "Show the sensor roles",
@@ -300,7 +296,6 @@ function followupsFor(topic) {
 }
 
 function systemPrompt(topic) {
-  // Human tone + structured, short, no hallucinations beyond KB/context.
   return [
     "You are a professional, friendly technical assistant for an album/portfolio site.",
     "Answer ONLY from the KB/context provided. If unknown, say it's not specified and invite the user to add it.",
@@ -375,7 +370,7 @@ export default async function handler(req, res) {
     const topic = topicDetected;
     const { ctx, ids } = await buildContext(question, topic);
 
-    // If user is too vague, gently clarify (UI can show followups as quick chips)
+    // If user is too vague, gently clarify
     if (!ctx || ctx.trim().length === 0) {
       const answer = "Could you tell me if you’re asking about **AAVSS** or the **Sri Lankan dataset**? I’ll keep it concise. 🙂";
       res.writeHead(200, headers);
