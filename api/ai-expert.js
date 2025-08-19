@@ -1,10 +1,10 @@
 
-// api/ai-expert.js — Edge Function (Groq → DeepInfra → Gemini) with KB + Topic-Aware Retrieval
-export const config = { runtime: 'edge' };
-
+// api/ai-expert.js — Text Q&A API (server)
+export const config = { runtime: 'nodejs18.x' }; // use Node so fs/path work below
 
 import fs from 'fs';
 import path from 'path';
+
 
 function readDocsStore() {
   try {
