@@ -10,8 +10,8 @@
     { "src": "/api/ingest-pdf", "dest": "/api/ingest-pdf.js" },
     { "src": "/api/docs.json",  "dest": "/api/docs.json.js" },
     { "src": "/api/delete-doc", "dest": "/api/delete-doc.js" },
-    { "src": "/api/img",        "dest": "/api/img.js" },      // ← image generate/browse
-    { "src": "/api/ask",        "dest": "/api/ask.js" },      // optional
-    { "src": "/api/ping",       "dest": "/api/ping.js" }      // optional
+    { "src": "/api/img",        "dest": "/api/img.js" },
+    { "src": "/api/ask",        "dest": "/api/ask.js" },
+    { "src": "/api/ping",       "dest": "/api/ping.js" }
   ]
 }
