@@ -117,15 +117,6 @@ function topK(q, k = 8, topic = "all") {
   return all;
 }
 
-function buildContext(q, topic = "all") {
-  const k = topK(q, 8, topic);
-  const ctx = k.map((d,i)=>`#${i+1} ${d.title}\n${d.text}`).join("\n\n");
-  const ids = k.map(d => d.type === "pdf"
-    ? `pdf:${d.id}|${d.title}|page=${d.page}|${d.url}`
-    : `kb:${d.id}|${d.title}`
-  );
-  return { ctx, ids };
-}
 
 /* ── providers ──────────────────────────────────────────────── */
 async function askGroq({ system, user, signal }) {
@@ -697,23 +688,6 @@ Try: **/browse rainy highway** to fetch reference photos.`);
 
 
 
-
-
-
-
-function scoreChunk(qTokens, chunk) {
-  const text = normalize(chunk.title + ' ' + chunk.text);
-  let s = 0;
-  for (const t of qTokens) {
-    if (!t) continue;
-    if (text.includes(` ${t} `) || text.startsWith(t + ' ') || text.endsWith(' ' + t)) s += 3;
-    else if (text.includes(t)) s += 1;
-  }
-  return s;
-}
-
-function topK(q, k = 8, topic = 'all') {
-  const qTokens = normalize(q).split(' ');
 
   // 1) KB docs (existing)
   const kbPool = KB.docs.filter(d => topic==='all' ? true : (d.topic === topic || d.topic === 'all'));
