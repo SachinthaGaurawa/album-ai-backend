@@ -2,6 +2,8 @@
   "version": 2,
   "routes": [
     { "src": "/api/ai",          "dest": "/api/ai.js" },
+    { "src": "/api/ai-expert",   "dest": "/api/ai-expert.js" },
+    { "src": "/api/img",         "dest": "/api/img.js" },
     { "src": "/api/ingest-pdf",  "dest": "/api/ingest-pdf.js" },
     { "src": "/api/ping",        "dest": "/api/ping.js" }
   ]
