@@ -1,12 +1,8 @@
 // ==========================================================
-// /api/ai-expert.js  — Text Q&A API (CommonJS for Vercel)
+// /api/ai-expert.js — Text Q&A API (CommonJS for Vercel)
 // RAG over internal KB + uploaded PDFs (via /api/docs.json)
 // Friendly small-talk, follow-ups, and provider fallback.
 // ==========================================================
-
-// /api/ai-expert.js
-module.exports.config = { runtime: "nodejs18.x" };
-
 
 /* ----------------------- tiny utils ---------------------- */
 
@@ -57,6 +53,14 @@ const normalize = (s) =>
 
 const TOK = (s) => normalize(s).split(" ").filter(Boolean);
 
+function getBaseUrl(req) {
+  const env = (process.env.API_BASE || "").trim().replace(/\/+$/, "");
+  if (env) return env;
+  const host = (req && req.headers && req.headers.host) || process.env.VERCEL_URL;
+  if (host) return `https://${host.replace(/\/+$/, "")}`;
+  return "http://localhost:3000";
+}
+
 /* ----------------------- personal facts ------------------ */
 
 const OWNER = {
@@ -73,7 +77,11 @@ const OWNER = {
 /* ----------------------- built-in KB --------------------- */
 
 const KB = {
-  meta: { project: "Album Expert KB", version: "2025-08-19", topics: ["aavss", "sldataset", "about"] },
+  meta: {
+    project: "Album Expert KB",
+    version: "2025-08-19",
+    topics: ["aavss", "sldataset", "about"],
+  },
   docs: [
     {
       id: "aavss-overview",
@@ -133,10 +141,9 @@ const KB = {
 
 /* -------------------- docs.json (PDF chunks) --------------- */
 
-async function readDocsStore() {
+async function readDocsStore(base) {
   try {
-    const base = process.env.API_BASE || "https://album-ai-backend-new.vercel.app";
-    const r = await fetch(`${base.replace(/\/+$/, "")}/api/docs.json`, { method: "GET" });
+    const r = await fetch(`${base}/api/docs.json`, { method: "GET" });
     const j = await r.json();
     return j && Array.isArray(j.docs) ? { docs: j.docs } : { docs: [] };
   } catch {
@@ -159,23 +166,42 @@ function scoreText(qTokens, text) {
 
 function detectTopic(question) {
   const n = normalize(question);
-  if (/(^|\s)(aavss|fusion|radar|lidar|jetson|adas|safety|tensorrt|hud|driver monitoring)(\s|$)/.test(n)) return "aavss";
-  if (/(^|\s)(dataset|data set|sri lanka|annotation|label|split|download|license|classes|night driving)(\s|$)/.test(n)) return "sldataset";
+  if (
+    /(^|\s)(aavss|fusion|radar|lidar|jetson|adas|safety|tensorrt|hud|driver monitoring)(\s|$)/.test(
+      n
+    )
+  )
+    return "aavss";
+  if (
+    /(^|\s)(dataset|data set|sri lanka|annotation|label|split|download|license|classes|night driving)(\s|$)/.test(
+      n
+    )
+  )
+    return "sldataset";
   if (/(^|\s)(owner|manufactur|concept|who (is|are)|about|sachintha)(\s|$)/.test(n)) return "about";
   return "all";
 }
 
-async function topK(question, k = 8, topic = "all") {
+async function topK(question, k = 8, topic = "all", baseUrl) {
   const qTok = TOK(question);
 
   // 1) KB
-  const kbPool = topic === "all" ? KB.docs : KB.docs.filter((d) => d.topic === topic || d.topic === "all" || topic === "about");
+  const kbPool =
+    topic === "all"
+      ? KB.docs
+      : KB.docs.filter((d) => d.topic === topic || d.topic === "all" || topic === "about");
   const kbRanked = kbPool
-    .map((d) => ({ type: "kb", id: d.id, title: d.title, text: d.text, s: scoreText(qTok, `${d.title}\n${d.text}`) }))
+    .map((d) => ({
+      type: "kb",
+      id: d.id,
+      title: d.title,
+      text: d.text,
+      s: scoreText(qTok, `${d.title}\n${d.text}`),
+    }))
     .filter((x) => x.s > 0);
 
-  // 2) PDFs
-  const store = await readDocsStore();
+  // 2) PDFs (already chunked by /api/ingest-pdf → /api/docs.json)
+  const store = await readDocsStore(baseUrl);
   const pdfRanked = (store.docs || [])
     .map((ch) => ({
       type: "pdf",
@@ -191,63 +217,101 @@ async function topK(question, k = 8, topic = "all") {
   const all = kbRanked.concat(pdfRanked).sort((a, b) => b.s - a.s).slice(0, k);
 
   if (!all.length) {
-    if (topic === "aavss")     return KB.docs.filter((d) => d.id === "aavss-overview").map((d) => ({ type: "kb", ...d, s: 1 }));
-    if (topic === "sldataset") return KB.docs.filter((d) => d.id === "sld-overview").map((d) => ({ type: "kb", ...d, s: 1 }));
-    if (topic === "about")     return KB.docs.filter((d) => d.id === "about-owner").map((d) => ({ type: "kb", ...d, s: 1 }));
+    if (topic === "aavss")
+      return KB.docs.filter((d) => d.id === "aavss-overview").map((d) => ({ type: "kb", ...d, s: 1 }));
+    if (topic === "sldataset")
+      return KB.docs.filter((d) => d.id === "sld-overview").map((d) => ({ type: "kb", ...d, s: 1 }));
+    if (topic === "about")
+      return KB.docs.filter((d) => d.id === "about-owner").map((d) => ({ type: "kb", ...d, s: 1 }));
   }
   return all;
 }
 
-async function buildContext(question, topic) {
-  const ranked = await topK(question, 8, topic);
+async function buildContext(question, topic, baseUrl) {
+  const ranked = await topK(question, 8, topic, baseUrl);
   const ctx = ranked.map((d, i) => `#${i + 1} ${d.title}\n${d.text}`).join("\n\n");
+
   const ids = ranked.map((d) =>
     d.type === "pdf" ? `pdf:${d.id}|${d.title}|page=${d.page}|${d.url}` : `kb:${d.id}|${d.title}`
   );
+
   const maxUnit = Math.max(...ranked.map((r) => r.s), 1);
-  const confidence = Math.min(1, ranked.length ? ranked.reduce((a, r) => a + r.s / maxUnit, 0) / ranked.length : 0);
+  const confidence = Math.min(
+    1,
+    ranked.length ? ranked.reduce((a, r) => a + r.s / maxUnit, 0) / ranked.length : 0
+  );
+
   return { ctx, ids, confidence };
 }
 
 /* ------------------------ model providers ------------------ */
 
 async function askGroq({ system, user, signal }) {
-  const key = process.env.GROQ_API_KEY; if (!key) throw new Error("GROQ_API_KEY not set");
+  const key = process.env.GROQ_API_KEY;
+  if (!key) throw new Error("GROQ_API_KEY not set");
   const r = await fetch("https://api.groq.com/openai/v1/chat/completions", {
-    method: "POST", signal,
+    method: "POST",
+    signal,
     headers: { Authorization: `Bearer ${key}`, "Content-Type": "application/json" },
-    body: JSON.stringify({ model: "llama-3.1-70b-versatile", temperature: 0.2, max_tokens: 450,
-      messages: [{ role: "system", content: system }, { role: "user", content: user }] }),
+    body: JSON.stringify({
+      model: "llama-3.1-70b-versatile",
+      temperature: 0.2,
+      max_tokens: 450,
+      messages: [
+        { role: "system", content: system },
+        { role: "user", content: user },
+      ],
+    }),
   });
   if (!r.ok) throw new Error(`Groq HTTP ${r.status}`);
-  const j = await r.json(); return (j?.choices?.[0]?.message?.content ?? "").trim();
+  const j = await r.json();
+  return (j?.choices?.[0]?.message?.content ?? "").trim();
 }
 
 async function askDeepInfra({ system, user, signal }) {
-  const key = process.env.DEEPINFRA_API_KEY; if (!key) throw new Error("DEEPINFRA_API_KEY not set");
+  const key = process.env.DEEPINFRA_API_KEY;
+  if (!key) throw new Error("DEEPINFRA_API_KEY not set");
   const r = await fetch("https://api.deepinfra.com/v1/openai/chat/completions", {
-    method: "POST", signal,
+    method: "POST",
+    signal,
     headers: { Authorization: `Bearer ${key}`, "Content-Type": "application/json" },
-    body: JSON.stringify({ model: "meta-llama/Meta-Llama-3.1-8B-Instruct", temperature: 0.2, max_tokens: 450,
-      messages: [{ role: "system", content: system }, { role: "user", content: user }] }),
+    body: JSON.stringify({
+      model: "meta-llama/Meta-Llama-3.1-8B-Instruct",
+      temperature: 0.2,
+      max_tokens: 450,
+      messages: [
+        { role: "system", content: system },
+        { role: "user", content: user },
+      ],
+    }),
   });
   if (!r.ok) throw new Error(`DeepInfra HTTP ${r.status}`);
-  const j = await r.json(); return (j?.choices?.[0]?.message?.content ?? "").trim();
+  const j = await r.json();
+  return (j?.choices?.[0]?.message?.content ?? "").trim();
 }
 
 async function askGemini({ system, user, signal }) {
-  const key = process.env.GEMINI_API_KEY; if (!key) throw new Error("GEMINI_API_KEY not set");
-  const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${encodeURIComponent(key)}`;
+  const key = process.env.GEMINI_API_KEY;
+  if (!key) throw new Error("GEMINI_API_KEY not set");
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${encodeURIComponent(
+    key
+  )}`;
   const r = await fetch(url, {
-    method: "POST", signal, headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ contents: [{ role: "user", parts: [{ text: `${system}\n\n---\n\n${user}` }] }],
-                           generationConfig: { temperature: 0.2, maxOutputTokens: 450 } }),
+    method: "POST",
+    signal,
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      contents: [{ role: "user", parts: [{ text: `${system}\n\n---\n\n${user}` }] }],
+      generationConfig: { temperature: 0.2, maxOutputTokens: 450 },
+    }),
   });
   if (!r.ok) throw new Error(`Gemini HTTP ${r.status}`);
   const j = await r.json();
-  const txt = j?.candidates?.[0]?.content?.parts?.map(p => p?.text || "").join("").trim()
-           || j?.candidates?.[0]?.content?.parts?.[0]?.text?.trim() || "";
-  return txt;
+  const text =
+    j?.candidates?.[0]?.content?.parts?.map((p) => p?.text || "").join("").trim() ||
+    j?.candidates?.[0]?.content?.parts?.[0]?.text?.trim() ||
+    "";
+  return text;
 }
 
 /* ---------------------- prompting strategy ------------------ */
@@ -306,7 +370,12 @@ function buildFollowups(topic) {
 function smallTalk(question) {
   const q = normalize(question);
   if (/^(hi|hey|hello|ayubowan|good (morning|evening|afternoon))\b/.test(q))
-    return { type: "greet", reply: `Hi there! I'm your assistant 🤝  Ask me about **AAVSS**, the **Sri Lanka dataset**, or upload a PDF for deeper answers.\nI can also **generate images** or **browse references**. What shall we do first?` };
+    return {
+      type: "greet",
+      reply:
+        `Hi there! I'm your assistant 🤝  Ask me about **AAVSS**, the **Sri Lanka dataset**, or upload a PDF for deeper answers.\n` +
+        `I can also **generate images** or **browse references**. What shall we do first?`,
+    };
   if (/^(thanks|thank you|cheers|appreciate)/.test(q))
     return { type: "thanks", reply: "You’re welcome! 😊  Want me to summarize something next?" };
   if (/^(bye|goodbye|see you|catch you)/.test(q))
@@ -316,15 +385,18 @@ function smallTalk(question) {
 
 /* -------------------- HTTP handler (CJS) -------------------- */
 
-module.exports = async function handler(req, res) {
+async function handler(req, res) {
   const origin = req.headers.origin || "*";
   const headers = corsHeaders(origin);
 
+  // CORS preflight
   if (req.method === "OPTIONS") {
     res.writeHead(204, headers);
     res.end();
     return;
   }
+
+  // Only POST for main flow
   if (req.method !== "POST") {
     res.writeHead(405, headers);
     res.end(JSON.stringify({ error: "Only POST supported" }));
@@ -338,7 +410,7 @@ module.exports = async function handler(req, res) {
 
     if (question === "__ping__") {
       res.writeHead(200, headers);
-      res.end(JSON.stringify({ ok: true }));
+      res.end(JSON.stringify({ ok: true, route: "/api/ai-expert", method: "POST", now: new Date().toISOString() }));
       return;
     }
 
@@ -352,13 +424,22 @@ module.exports = async function handler(req, res) {
     const st = smallTalk(question);
     if (st) {
       res.writeHead(200, headers);
-      res.end(JSON.stringify({ answer: st.reply, provider: "smalltalk", topic: "general", sources: [], followups: buildFollowups("all") }));
+      res.end(
+        JSON.stringify({
+          answer: st.reply,
+          provider: "smalltalk",
+          topic: "general",
+          sources: [],
+          followups: buildFollowups("all"),
+        })
+      );
       return;
     }
 
     // route + context
     const topic = detectTopic(question);
-    const { ctx, ids, confidence } = await buildContext(question, topic);
+    const baseUrl = getBaseUrl(req);
+    const { ctx, ids, confidence } = await buildContext(question, topic, baseUrl);
 
     if (!ctx || ctx.length < 20 || confidence < 0.15) {
       const choices = [
@@ -367,10 +448,17 @@ module.exports = async function handler(req, res) {
         { id: "about", label: "About/Ownership" },
       ];
       res.writeHead(200, headers);
-      res.end(JSON.stringify({
-        answer: "I can help best if I know the topic. Which would you like to talk about? (AAVSS, Dataset, or About) 🙂",
-        provider: "clarify", topic: "general", sources: [], followups: choices.map(c => `Switch to ${c.label}?`), choices
-      }));
+      res.end(
+        JSON.stringify({
+          answer:
+            "I can help best if I know the topic. Which would you like to talk about? (AAVSS, Dataset, or About) 🙂",
+          provider: "clarify",
+          topic: "general",
+          sources: [],
+          followups: choices.map((c) => `Switch to ${c.label}?`),
+          choices,
+        })
+      );
       return;
     }
 
@@ -378,7 +466,8 @@ module.exports = async function handler(req, res) {
     const usr = userPrompt(question, ctx);
 
     // Provider cascade
-    let answer = "", provider = "";
+    let answer = "",
+      provider = "";
     const providers = [];
     if (process.env.GROQ_API_KEY) providers.push({ name: "groq", fn: askGroq });
     if (process.env.DEEPINFRA_API_KEY) providers.push({ name: "deepinfra", fn: askDeepInfra });
@@ -389,42 +478,62 @@ module.exports = async function handler(req, res) {
         const t = withTimeout(30_000);
         answer = await p.fn({ system: sys, user: usr, signal: t.signal });
         t.clear();
-        if (answer) { provider = p.name; break; }
-      } catch { /* try next */ }
+        if (answer) {
+          provider = p.name;
+          break;
+        }
+      } catch {
+        // try next provider
+      }
     }
 
     // Fallback: stitched KB
     if (!answer) {
-      const stitched = ids.map((id, i) => {
-        const [kind, rest] = id.split(":");
-        if (kind === "kb") {
-          const kbId = rest.split("|")[0];
-          const d = KB.docs.find((x) => x.id === kbId);
-          return d ? `(${i + 1}) ${d.title}\n${d.text}` : "";
-        }
-        if (kind === "pdf") {
-          const title = rest.split("|")[0];
-          return `(${i + 1}) ${title} (from PDF)`;
-        }
-        return "";
-      }).filter(Boolean).join("\n\n");
+      const stitched = ids
+        .map((id, i) => {
+          const [kind, rest] = id.split(":");
+          if (kind === "kb") {
+            const kbId = rest.split("|")[0];
+            const d = KB.docs.find((x) => x.id === kbId);
+            return d ? `(${i + 1}) ${d.title}\n${d.text}` : "";
+          }
+          if (kind === "pdf") {
+            const title = rest.split("|")[0];
+            return `(${i + 1}) ${title} (from PDF)`;
+          }
+          return "";
+        })
+        .filter(Boolean)
+        .join("\n\n");
 
-      answer = "I couldn’t reach the AI providers just now. Here’s a concise summary from the knowledge base:\n\n" + (stitched || "No KB matches found.");
+      answer =
+        "I couldn’t reach the AI providers just now. Here’s a concise summary from the knowledge base:\n\n" +
+        (stitched || "No KB matches found.");
       provider = "kb-fallback";
     }
 
+    // tidy spacing
     answer = (answer || "").trim().replace(/\n{3,}/g, "\n\n");
 
     res.writeHead(200, headers);
-    res.end(JSON.stringify({ answer, provider, topic, confidence, sources: ids, followups: buildFollowups(topic) }));
+    res.end(
+      JSON.stringify({
+        answer,
+        provider,
+        topic,
+        confidence,
+        sources: ids,
+        followups: buildFollowups(topic),
+      })
+    );
   } catch (err) {
     console.error("ai-expert error:", err);
     const msg = err?.name === "AbortError" ? "Upstream request timed out" : err?.message || "Server error";
     res.writeHead(500, headers);
     res.end(JSON.stringify({ error: msg }));
   }
-};
+}
 
-
-
-
+// ✅ Export once (CommonJS) and then attach config so Vercel reads it.
+module.exports = handler;
+module.exports.config = { runtime: "nodejs18.x" };
