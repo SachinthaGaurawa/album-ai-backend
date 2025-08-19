@@ -1,8 +1,10 @@
 // ==========================================================
 // /api/ai-expert.js  — Text Q&A API (CommonJS for Vercel)
 // RAG over internal KB + uploaded PDFs (via /api/docs.json)
-// Small-talk + follow-ups + provider fallback
+// Friendly small-talk, follow-ups, and provider fallback.
 // ==========================================================
+
+module.exports.config = { runtime: "nodejs18.x" };
 
 /* ----------------------- tiny utils ---------------------- */
 
@@ -11,10 +13,8 @@ function corsHeaders(origin) {
     .split(",")
     .map((s) => s.trim().replace(/\/+$/, ""))
     .filter(Boolean);
-
   const o = (origin || "").replace(/\/+$/, "");
   const allow = !origin || ALLOWED.length === 0 || ALLOWED.includes(o);
-
   return {
     ...(allow ? { "Access-Control-Allow-Origin": origin || "*" } : {}),
     "Access-Control-Allow-Methods": "POST, OPTIONS",
@@ -54,7 +54,7 @@ const normalize = (s) =>
 const TOK = (s) => normalize(s).split(" ").filter(Boolean);
 
 /* ----------------------- personal facts ------------------ */
-// Local facts you wanted hard-coded so the assistant knows “you”
+
 const OWNER = {
   fullName: "Sachintha Gaurawa",
   roles: ["Owner", "Concept designer", "Manufacturer"],
@@ -69,7 +69,7 @@ const OWNER = {
 /* ----------------------- built-in KB --------------------- */
 
 const KB = {
-  meta: { project: "Album Expert KB", version: "2025-08-20", topics: ["aavss", "sldataset", "about"] },
+  meta: { project: "Album Expert KB", version: "2025-08-19", topics: ["aavss", "sldataset", "about"] },
   docs: [
     // AAVSS
     {
@@ -98,7 +98,7 @@ const KB = {
       topic: "aavss",
       title: "AAVSS — Fusion Pipeline (high level)",
       text:
-        "Calibration → time-sync → per-sensor detection/feature extraction → association " +
+        "Calibration → time-sync → per-sensor detection/feature extraction → object association " +
         "→ tracking → risk scoring/alerting. Safety analytics delivered in-cabin as HUD/alerts.",
     },
 
@@ -112,7 +112,7 @@ const KB = {
         "Includes annotations for lanes, signs, and hazards. Example media included; add PDFs for specs.",
     },
 
-    // About / You
+    // About / Ownership / You
     {
       id: "about-owner",
       topic: "about",
@@ -127,18 +127,18 @@ const KB = {
       title: `Who is ${OWNER.fullName}?`,
       text:
         `${OWNER.fullName} — ${OWNER.tagline} ` +
-        "Leads development and product direction for AAVSS and the Sri Lanka dataset.",
+        "Leads development and product direction for AAVSS and the Sri Lanka dataset efforts.",
     },
   ],
 };
 
 /* -------------------- docs.json (PDF chunks) --------------- */
-// Reads your chunked PDF store produced by /api/ingest-pdf
+
 async function readDocsStore() {
   try {
     const base = process.env.API_BASE || "https://album-ai-backend-new.vercel.app";
     const r = await fetch(`${base.replace(/\/+$/, "")}/api/docs.json`, { method: "GET" });
-    const j = await r.json().catch(() => ({}));
+    const j = await r.json();
     return j && Array.isArray(j.docs) ? { docs: j.docs } : { docs: [] };
   } catch {
     return { docs: [] };
@@ -161,8 +161,7 @@ function scoreText(qTokens, text) {
 function detectTopic(question) {
   const n = normalize(question);
   if (/(^|\s)(aavss|fusion|radar|lidar|jetson|adas|safety|tensorrt|hud|driver monitoring)(\s|$)/.test(n)) return "aavss";
-  if (/(^|\s)(dataset|data set|sri lanka|annotation|label|split|download|license|classes|night driving)(\s|$)/.test(n))
-    return "sldataset";
+  if (/(^|\s)(dataset|data set|sri lanka|annotation|label|split|download|license|classes|night driving)(\s|$)/.test(n)) return "sldataset";
   if (/(^|\s)(owner|manufactur|concept|who (is|are)|about|sachintha)(\s|$)/.test(n)) return "about";
   return "all";
 }
@@ -171,9 +170,7 @@ async function topK(question, k = 8, topic = "all") {
   const qTok = TOK(question);
 
   // 1) KB
-  const kbPool = topic === "all"
-    ? KB.docs
-    : KB.docs.filter((d) => d.topic === topic || d.topic === "all" || topic === "about");
+  const kbPool = topic === "all" ? KB.docs : KB.docs.filter((d) => d.topic === topic || d.topic === "all" || topic === "about");
   const kbRanked = kbPool
     .map((d) => ({
       type: "kb",
@@ -211,11 +208,17 @@ async function topK(question, k = 8, topic = "all") {
 async function buildContext(question, topic) {
   const ranked = await topK(question, 8, topic);
   const ctx = ranked.map((d, i) => `#${i + 1} ${d.title}\n${d.text}`).join("\n\n");
+
   const ids = ranked.map((d) =>
     d.type === "pdf" ? `pdf:${d.id}|${d.title}|page=${d.page}|${d.url}` : `kb:${d.id}|${d.title}`
   );
+
   const maxUnit = Math.max(...ranked.map((r) => r.s), 1);
-  const confidence = Math.min(1, ranked.length ? ranked.reduce((a, r) => a + r.s / maxUnit, 0) / ranked.length : 0);
+  const confidence = Math.min(
+    1,
+    ranked.length ? ranked.reduce((a, r) => a + r.s / maxUnit, 0) / ranked.length : 0
+  );
+
   return { ctx, ids, confidence };
 }
 
@@ -287,10 +290,10 @@ function systemPrompt(topic) {
   return [
     "You are a warm, helpful technical assistant for an album/portfolio site.",
     "Respond ONLY with facts found in the provided Knowledge Base (KB) below.",
-    "If something isn't in the KB, say so briefly and invite the user to upload/ingest a PDF.",
-    "Prefer short paragraphs and bullets. Use **bold** for key terms. Add a friendly emoji sparingly.",
-    `Topic focus: ${topic}.`,
-    "Offer 2–4 smart follow-up questions at the end.",
+    "If something isn't in the KB, say so briefly and invite the user to upload or ingest a PDF.",
+    "Prefer short paragraphs and bullets. Use **bold** for key terms. Include friendly emojis sparingly.",
+    `Topic focus: ${topic}. Stay on one topic unless user explicitly asks to compare.`,
+    "Keep tone human, supportive, and concise. Offer 2–4 smart follow-up questions.",
   ].join(" ");
 }
 
@@ -304,31 +307,31 @@ function userPrompt(question, ctx) {
     `User question: ${question}`,
     "",
     "Instructions:",
-    "- Use only KB facts. Do not invent specifics.",
-    "- If unknown, say it's unspecified and suggest adding the detail via PDF ingest.",
-    "- Provide clear, practical guidance.",
+    "- Use only KB facts. Do not invent specifics (e.g., exact sensor SKUs) unless present.",
+    "- If unknown, say it's unspecified and suggest uploading or adding the detail.",
+    "- Provide clear, practical guidance. Bullets preferred for lists.",
   ].join("\n");
 }
 
 function buildFollowups(topic) {
   if (topic === "aavss")
     return [
-      "Want a quick architecture walkthrough?",
-      "List recommended calibration steps?",
-      "Show safety alert thresholds and examples?",
+      "Want a quick architecture diagram explanation?",
+      "Should I list recommended calibration steps?",
+      "Do you want safety alert thresholds and examples?",
       "Upload your sensor SKUs for model-specific guidance?",
     ];
   if (topic === "sldataset")
     return [
-      "Need train/val/test split suggestions?",
-      "Outline annotation formats with examples?",
-      "Add evaluation metrics to track?",
-      "Summarize dataset license & allowed use?",
+      "Do you need splits for train/val/test?",
+      "Should I outline annotation formats and examples?",
+      "Want evaluation metrics you can track?",
+      "Need license summary and allowed use?",
     ];
   return [
-    "Compare AAVSS vs the Dataset?",
-    "Suggest next steps or a quick start?",
-    "Search or generate reference images?",
+    "Want an overview of AAVSS vs the Dataset?",
+    "Shall I suggest next steps or a quick start?",
+    "Do you want me to search images or generate visuals?",
   ];
 }
 
@@ -340,8 +343,8 @@ function smallTalk(question) {
     return {
       type: "greet",
       reply:
-        `Hi there! I'm your assistant 🤝  Ask about **AAVSS**, the **Sri Lanka dataset**, or upload a PDF for deeper answers.\n` +
-        `I can also **generate** or **browse** images. What shall we do first?`,
+        `Hi there! I'm your assistant 🤝  Ask me about **AAVSS**, the **Sri Lanka dataset**, or upload a PDF for deeper answers.\n` +
+        `I can also **generate images** or **browse references**. What shall we do first?`,
     };
   if (/^(thanks|thank you|cheers|appreciate)/.test(q))
     return { type: "thanks", reply: "You’re welcome! 😊  Want me to summarize something next?" };
@@ -378,39 +381,45 @@ module.exports = async function handler(req, res) {
       return;
     }
 
-    // Small-talk branch first
+    // small-talk first
     const st = smallTalk(question);
     if (st) {
       res.writeHead(200, headers);
-      res.end(JSON.stringify({
-        answer: st.reply,
-        provider: "smalltalk",
-        topic: "general",
-        sources: [],
-        followups: buildFollowups("all"),
-      }));
+      res.end(
+        JSON.stringify({
+          answer: st.reply,
+          provider: "smalltalk",
+          topic: "general",
+          sources: [],
+          followups: buildFollowups("all"),
+        })
+      );
       return;
     }
 
+    // route + context
     const topic = detectTopic(question);
     const { ctx, ids, confidence } = await buildContext(question, topic);
 
-    // Retrieval was weak → ask to choose topic (user-friendly)
+    // If retrieval is weak, gently clarify
     if (!ctx || ctx.length < 20 || confidence < 0.15) {
       const choices = [
         { id: "aavss", label: "AAVSS (vehicle safety system)" },
         { id: "sldataset", label: "Sri Lankan Driving Dataset" },
-        { id: "about", label: "About / Ownership" },
+        { id: "about", label: "About/Ownership" },
       ];
       res.writeHead(200, headers);
-      res.end(JSON.stringify({
-        answer: "I can help best if I know the topic. Which would you like to talk about? 🙂",
-        provider: "clarify",
-        topic: "general",
-        sources: [],
-        followups: choices.map((c) => `Switch to ${c.label}?`),
-        choices,
-      }));
+      res.end(
+        JSON.stringify({
+          answer:
+            "I can help best if I know the topic. Which would you like to talk about? (AAVSS, Dataset, or About) 🙂",
+          provider: "clarify",
+          topic: "general",
+          sources: [],
+          followups: choices.map((c) => `Switch to ${c.label}?`),
+          choices,
+        })
+      );
       return;
     }
 
@@ -420,55 +429,52 @@ module.exports = async function handler(req, res) {
     // Provider cascade
     let answer = "", provider = "";
     const providers = [];
-    if (process.env.GROQ_API_KEY)       providers.push({ name: "groq",      fn: askGroq });
-    if (process.env.DEEPINFRA_API_KEY)  providers.push({ name: "deepinfra", fn: askDeepInfra });
-    if (process.env.GEMINI_API_KEY)     providers.push({ name: "gemini",    fn: askGemini });
+    if (process.env.GROQ_API_KEY) providers.push({ name: "groq", fn: askGroq });
+    if (process.env.DEEPINFRA_API_KEY) providers.push({ name: "deepinfra", fn: askDeepInfra });
+    if (process.env.GEMINI_API_KEY) providers.push({ name: "gemini", fn: askGemini });
 
     for (const p of providers) {
       try {
         const t = withTimeout(30_000);
-        const out = await p.fn({ system: sys, user: usr, signal: t.signal });
+        answer = await p.fn({ system: sys, user: usr, signal: t.signal });
         t.clear();
-        if (out) { answer = out; provider = p.name; break; }
-      } catch (e) {
-        console.error(`[ai-expert] provider ${p.name} failed:`, e?.message || e);
-        // try next
-      }
+        if (answer) { provider = p.name; break; }
+      } catch { /* try next */ }
     }
 
-    // Fallback: stitched KB so you still get an answer
+    // Fallback: stitched KB
     if (!answer) {
-      const stitched = (ids || []).map((id, i) => {
-        const [kind, rest] = id.split(":");
-        if (kind === "kb") {
-          const kbId = rest.split("|")[0];
-          const d = KB.docs.find((x) => x.id === kbId);
-          return d ? `(${i + 1}) ${d.title}\n${d.text}` : "";
-        }
-        if (kind === "pdf") {
-          const title = rest.split("|")[0];
-          return `(${i + 1}) ${title} (from PDF)`;
-        }
-        return "";
-      }).filter(Boolean).join("\n\n");
+      const stitched = ids
+        .map((id, i) => {
+          const [kind, rest] = id.split(":");
+          if (kind === "kb") {
+            const kbId = rest.split("|")[0];
+            const d = KB.docs.find((x) => x.id === kbId);
+            return d ? `(${i + 1}) ${d.title}\n${d.text}` : "";
+          }
+          if (kind === "pdf") {
+            const title = rest.split("|")[0];
+            return `(${i + 1}) ${title} (from PDF)`;
+          }
+          return "";
+        })
+        .filter(Boolean)
+        .join("\n\n");
 
-      answer = "I couldn’t reach the AI providers just now. Here’s a concise summary from the knowledge base:\n\n" +
-               (stitched || "No KB matches found.");
+      answer =
+        "I couldn’t reach the AI providers just now. Here’s a concise summary from the knowledge base:\n\n" +
+        (stitched || "No KB matches found.");
       provider = "kb-fallback";
     }
 
+    answer = (answer || "").trim().replace(/\n{3,}/g, "\n\n");
+
     res.writeHead(200, headers);
     res.end(JSON.stringify({
-      answer: (answer || "").trim().replace(/\n{3,}/g, "\n\n"),
-      provider,
-      topic,
-      confidence,
-      sources: ids || [],
-      followups: buildFollowups(topic),
+      answer, provider, topic, confidence, sources: ids, followups: buildFollowups(topic),
     }));
   } catch (err) {
-    console.error("[ai-expert] fatal:", err?.stack || err?.message || err);
-    const msg = err?.name === "AbortError" ? "Upstream request timed out" : (err?.message || "Server error");
+    const msg = err?.name === "AbortError" ? "Upstream request timed out" : err?.message || "Server error";
     res.writeHead(500, headers);
     res.end(JSON.stringify({ error: msg }));
   }
