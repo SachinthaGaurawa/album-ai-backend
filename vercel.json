@@ -1,10 +1,10 @@
 {
   "version": 2,
   "routes": [
-    { "src": "/api/ai",         "dest": "/api/ai.js" },
-    { "src": "/api/ai-expert",  "dest": "/api/ai-expert.js" },
-    { "src": "/api/img",        "dest": "/api/img.js" },
-    { "src": "/api/ingest-pdf", "dest": "/api/ingest-pdf.js" },
-    { "src": "/api/ping",       "dest": "/api/ping.js" }
+    { "src": "/api/ai",          "dest": "/api/ai.js" },          // already present
+    { "src": "/api/ai-expert",   "dest": "/api/ai-expert.js" },   // already present
+    { "src": "/api/ingest-pdf",  "dest": "/api/ingest-pdf.js" },  // already present
+    { "src": "/api/docs.json",   "dest": "/api/docs.json.js" },   // NEW: exposes your docs.json.js endpoint
+    { "src": "/api/delete-doc",  "dest": "/api/delete-doc.js" }   // NEW: exposes your delete-doc.js endpoint
   ]
 }
