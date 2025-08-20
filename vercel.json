@@ -1,6 +1,5 @@
 {
   "version": 2,
-  "functions": { "api/**/*.js": { "runtime": "nodejs18.x" } },
   "routes": [
     { "src": "/api/ai",          "dest": "/api/ai.js" },
     { "src": "/api/ai-expert",   "dest": "/api/ai-expert.js" },
