@@ -1,11 +1,8 @@
 // ==========================================================
-// /api/ai-expert.js  — Text Q&A API (CommonJS for Vercel)
+// /api/ai-expert.js — Text Q&A API (CommonJS for Vercel)
 // RAG over internal KB + uploaded PDFs (via /api/docs.json)
 // Friendly small-talk, follow-ups, and provider fallback.
 // ==========================================================
-
-/** Ensure Node 18 on Vercel */
-module.exports.config = { runtime: "nodejs18.x" };
 
 /* ----------------------- tiny utils ---------------------- */
 
@@ -56,6 +53,14 @@ const normalize = (s) =>
 
 const TOK = (s) => normalize(s).split(" ").filter(Boolean);
 
+function getBaseUrl(req) {
+  const env = (process.env.API_BASE || "").trim().replace(/\/+$/, "");
+  if (env) return env;
+  const host = (req && req.headers && req.headers.host) || process.env.VERCEL_URL;
+  if (host) return `https://${host.replace(/\/+$/, "")}`;
+  return "http://localhost:3000";
+}
+
 /* ----------------------- personal facts ------------------ */
 
 const OWNER = {
@@ -78,7 +83,6 @@ const KB = {
     topics: ["aavss", "sldataset", "about"],
   },
   docs: [
-    // AAVSS
     {
       id: "aavss-overview",
       topic: "aavss",
@@ -108,8 +112,6 @@ const KB = {
         "Calibration → time-sync → per-sensor detection/feature extraction → object association " +
         "→ tracking → risk scoring/alerting. Safety analytics delivered in-cabin as HUD/alerts.",
     },
-
-    // Sri Lanka Dataset
     {
       id: "sld-overview",
       topic: "sldataset",
@@ -118,8 +120,6 @@ const KB = {
         "Open driving dataset across Sri Lankan road scenarios (urban/rural; rain, fog, night). " +
         "Includes annotations for lanes, signs, and hazards. Example media included; add PDFs for specs.",
     },
-
-    // About / Ownership / You
     {
       id: "about-owner",
       topic: "about",
@@ -141,15 +141,9 @@ const KB = {
 
 /* -------------------- docs.json (PDF chunks) --------------- */
 
-// We call your own API so this works on Vercel (no filesystem needed)
-async function readDocsStore() {
+async function readDocsStore(base) {
   try {
-    const base =
-      process.env.API_BASE || "https://album-ai-backend-new.vercel.app";
-    const r = await fetch(
-      `${base.replace(/\/+$/, "")}/api/docs.json`,
-      { method: "GET" }
-    );
+    const r = await fetch(`${base}/api/docs.json`, { method: "GET" });
     const j = await r.json();
     return j && Array.isArray(j.docs) ? { docs: j.docs } : { docs: [] };
   } catch {
@@ -164,8 +158,7 @@ function scoreText(qTokens, text) {
   let s = 0;
   for (const tok of qTokens) {
     if (!tok) continue;
-    if (t.includes(` ${tok} `) || t.startsWith(tok + " ") || t.endsWith(" " + tok))
-      s += 3;
+    if (t.includes(` ${tok} `) || t.startsWith(tok + " ") || t.endsWith(" " + tok)) s += 3;
     else if (t.includes(tok)) s += 1;
   }
   return s;
@@ -185,23 +178,18 @@ function detectTopic(question) {
     )
   )
     return "sldataset";
-  if (
-    /(^|\s)(owner|manufactur|concept|who (is|are)|about|sachintha)(\s|$)/.test(n)
-  )
-    return "about";
+  if (/(^|\s)(owner|manufactur|concept|who (is|are)|about|sachintha)(\s|$)/.test(n)) return "about";
   return "all";
 }
 
-async function topK(question, k = 8, topic = "all") {
+async function topK(question, k = 8, topic = "all", baseUrl) {
   const qTok = TOK(question);
 
   // 1) KB
   const kbPool =
     topic === "all"
       ? KB.docs
-      : KB.docs.filter(
-          (d) => d.topic === topic || d.topic === "all" || topic === "about"
-        );
+      : KB.docs.filter((d) => d.topic === topic || d.topic === "all" || topic === "about");
   const kbRanked = kbPool
     .map((d) => ({
       type: "kb",
@@ -213,7 +201,7 @@ async function topK(question, k = 8, topic = "all") {
     .filter((x) => x.s > 0);
 
   // 2) PDFs (already chunked by /api/ingest-pdf → /api/docs.json)
-  const store = await readDocsStore();
+  const store = await readDocsStore(baseUrl);
   const pdfRanked = (store.docs || [])
     .map((ch) => ({
       type: "pdf",
@@ -230,32 +218,23 @@ async function topK(question, k = 8, topic = "all") {
 
   if (!all.length) {
     if (topic === "aavss")
-      return KB.docs
-        .filter((d) => d.id === "aavss-overview")
-        .map((d) => ({ type: "kb", ...d, s: 1 }));
+      return KB.docs.filter((d) => d.id === "aavss-overview").map((d) => ({ type: "kb", ...d, s: 1 }));
     if (topic === "sldataset")
-      return KB.docs
-        .filter((d) => d.id === "sld-overview")
-        .map((d) => ({ type: "kb", ...d, s: 1 }));
+      return KB.docs.filter((d) => d.id === "sld-overview").map((d) => ({ type: "kb", ...d, s: 1 }));
     if (topic === "about")
-      return KB.docs
-        .filter((d) => d.id === "about-owner")
-        .map((d) => ({ type: "kb", ...d, s: 1 }));
+      return KB.docs.filter((d) => d.id === "about-owner").map((d) => ({ type: "kb", ...d, s: 1 }));
   }
   return all;
 }
 
-async function buildContext(question, topic) {
-  const ranked = await topK(question, 8, topic);
+async function buildContext(question, topic, baseUrl) {
+  const ranked = await topK(question, 8, topic, baseUrl);
   const ctx = ranked.map((d, i) => `#${i + 1} ${d.title}\n${d.text}`).join("\n\n");
 
   const ids = ranked.map((d) =>
-    d.type === "pdf"
-      ? `pdf:${d.id}|${d.title}|page=${d.page}|${d.url}`
-      : `kb:${d.id}|${d.title}`
+    d.type === "pdf" ? `pdf:${d.id}|${d.title}|page=${d.page}|${d.url}` : `kb:${d.id}|${d.title}`
   );
 
-  // crude confidence
   const maxUnit = Math.max(...ranked.map((r) => r.s), 1);
   const confidence = Math.min(
     1,
@@ -273,10 +252,7 @@ async function askGroq({ system, user, signal }) {
   const r = await fetch("https://api.groq.com/openai/v1/chat/completions", {
     method: "POST",
     signal,
-    headers: {
-      Authorization: `Bearer ${key}`,
-      "Content-Type": "application/json",
-    },
+    headers: { Authorization: `Bearer ${key}`, "Content-Type": "application/json" },
     body: JSON.stringify({
       model: "llama-3.1-70b-versatile",
       temperature: 0.2,
@@ -289,7 +265,7 @@ async function askGroq({ system, user, signal }) {
   });
   if (!r.ok) throw new Error(`Groq HTTP ${r.status}`);
   const j = await r.json();
-  return (j && j.choices && j.choices[0] && j.choices[0].message && j.choices[0].message.content || "").trim();
+  return (j?.choices?.[0]?.message?.content ?? "").trim();
 }
 
 async function askDeepInfra({ system, user, signal }) {
@@ -298,10 +274,7 @@ async function askDeepInfra({ system, user, signal }) {
   const r = await fetch("https://api.deepinfra.com/v1/openai/chat/completions", {
     method: "POST",
     signal,
-    headers: {
-      Authorization: `Bearer ${key}`,
-      "Content-Type": "application/json",
-    },
+    headers: { Authorization: `Bearer ${key}`, "Content-Type": "application/json" },
     body: JSON.stringify({
       model: "meta-llama/Meta-Llama-3.1-8B-Instruct",
       temperature: 0.2,
@@ -314,15 +287,15 @@ async function askDeepInfra({ system, user, signal }) {
   });
   if (!r.ok) throw new Error(`DeepInfra HTTP ${r.status}`);
   const j = await r.json();
-  return (j && j.choices && j.choices[0] && j.choices[0].message && j.choices[0].message.content || "").trim();
+  return (j?.choices?.[0]?.message?.content ?? "").trim();
 }
 
 async function askGemini({ system, user, signal }) {
   const key = process.env.GEMINI_API_KEY;
   if (!key) throw new Error("GEMINI_API_KEY not set");
-  const url =
-    `https://generativelanguage.googleapis.com/v1beta/models/` +
-    `gemini-1.5-flash:generateContent?key=${encodeURIComponent(key)}`;
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${encodeURIComponent(
+    key
+  )}`;
   const r = await fetch(url, {
     method: "POST",
     signal,
@@ -335,9 +308,8 @@ async function askGemini({ system, user, signal }) {
   if (!r.ok) throw new Error(`Gemini HTTP ${r.status}`);
   const j = await r.json();
   const text =
-    (j && j.candidates && j.candidates[0] && j.candidates[0].content &&
-      j.candidates[0].content.parts &&
-      j.candidates[0].content.parts.map((p) => (p && p.text) || "").join("").trim()) ||
+    j?.candidates?.[0]?.content?.parts?.map((p) => p?.text || "").join("").trim() ||
+    j?.candidates?.[0]?.content?.parts?.[0]?.text?.trim() ||
     "";
   return text;
 }
@@ -414,16 +386,17 @@ function smallTalk(question) {
 /* -------------------- HTTP handler (CJS) -------------------- */
 
 async function handler(req, res) {
-  const origin = req.headers && (req.headers.origin || "*");
+  const origin = req.headers.origin || "*";
   const headers = corsHeaders(origin);
 
-  // Preflight: handled before any other logic
+  // CORS preflight
   if (req.method === "OPTIONS") {
     res.writeHead(204, headers);
     res.end();
     return;
   }
 
+  // Only POST for main flow
   if (req.method !== "POST") {
     res.writeHead(405, headers);
     res.end(JSON.stringify({ error: "Only POST supported" }));
@@ -432,10 +405,9 @@ async function handler(req, res) {
 
   try {
     const body = await readJson(req);
-    const rawQ = (body && (body.question ?? body.q ?? body.text) || "").toString();
+    const rawQ = (body?.question ?? body?.q ?? body?.text ?? "").toString();
     const question = rawQ.trim();
 
-    // Health probe (for curl / CI)
     if (question === "__ping__") {
       res.writeHead(200, headers);
       res.end(JSON.stringify({ ok: true, route: "/api/ai-expert", method: "POST", now: new Date().toISOString() }));
@@ -466,9 +438,9 @@ async function handler(req, res) {
 
     // route + context
     const topic = detectTopic(question);
-    const { ctx, ids, confidence } = await buildContext(question, topic);
+    const baseUrl = getBaseUrl(req);
+    const { ctx, ids, confidence } = await buildContext(question, topic, baseUrl);
 
-    // If retrieval is weak, gently clarify
     if (!ctx || ctx.length < 20 || confidence < 0.15) {
       const choices = [
         { id: "aavss", label: "AAVSS (vehicle safety system)" },
@@ -494,8 +466,8 @@ async function handler(req, res) {
     const usr = userPrompt(question, ctx);
 
     // Provider cascade
-    let answer = "";
-    let provider = "";
+    let answer = "",
+      provider = "";
     const providers = [];
     if (process.env.GROQ_API_KEY) providers.push({ name: "groq", fn: askGroq });
     if (process.env.DEEPINFRA_API_KEY) providers.push({ name: "deepinfra", fn: askDeepInfra });
@@ -504,14 +476,13 @@ async function handler(req, res) {
     for (const p of providers) {
       try {
         const t = withTimeout(30_000);
-        const out = await p.fn({ system: sys, user: usr, signal: t.signal });
+        answer = await p.fn({ system: sys, user: usr, signal: t.signal });
         t.clear();
-        if (out) {
-          answer = out;
+        if (answer) {
           provider = p.name;
           break;
         }
-      } catch (e) {
+      } catch {
         // try next provider
       }
     }
@@ -541,7 +512,7 @@ async function handler(req, res) {
       provider = "kb-fallback";
     }
 
-    // trim + gentle spacing
+    // tidy spacing
     answer = (answer || "").trim().replace(/\n{3,}/g, "\n\n");
 
     res.writeHead(200, headers);
@@ -556,14 +527,13 @@ async function handler(req, res) {
       })
     );
   } catch (err) {
-    const msg =
-      err && err.name === "AbortError"
-        ? "Upstream request timed out"
-        : (err && err.message) || "Server error";
+    console.error("ai-expert error:", err);
+    const msg = err?.name === "AbortError" ? "Upstream request timed out" : err?.message || "Server error";
     res.writeHead(500, headers);
     res.end(JSON.stringify({ error: msg }));
   }
 }
 
-/** CommonJS default export */
+// ✅ Export once (CommonJS) and then attach config so Vercel reads it.
 module.exports = handler;
+module.exports.config = { runtime: "nodejs18.x" };
