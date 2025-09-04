@@ -1,43 +1,55 @@
-window.__API_BASE__ = 'https://album-ai-backend-new.vercel.app';
-const API_BASE = window.__API_BASE__;
+// api/ask.js – Answers a single question using the knowledge base (no chat memory, just RAG).
+import { createDeepInfra } from '@ai-sdk/deepinfra';
+import { generateText, embed } from 'ai';
+const { getRelevantDocs } = require('../db');
 
-
-askBtn.addEventListener('click', async () => {
-  const q = askInput.value.trim();
-  if (!q) return;
-
-  askResult.innerHTML = '<div class="ask-loading">Thinking…</div>';
-
-  try {
-    // 1) Image Generation: "/gen ..." or "generate ..."
-    if (isGen(q)) {
-      const prompt = q.replace(/^\/?(gen|generate)\s*/i,'').trim() || prompt('Describe the image to generate:','photoreal rainy highway at night, reflections');
-      if (!prompt) { askResult.textContent = 'Canceled.'; return; }
-      const imgs = await doImgGenerate(prompt, { n: 2, aspect: '16:9', realism: 'photo' });
-      askResult.innerHTML = `<p>Generated for: <strong>${prompt}</strong></p>`;
-      askResult.appendChild(renderAskImages(imgs));
-      return;
-    }
-
-    // 2) Image Browse: "/browse ..." or "search images ..."
-    if (isBrowse(q)) {
-      const query = q.replace(/^\/?(browse|find|search)\s*/i,'').replace(/\b(images?|photos?)\b/ig,'').trim() || prompt('Search images for:','rainy highway night');
-      if (!query) { askResult.textContent = 'Canceled.'; return; }
-      const imgs = await doImgBrowse(query, { n: 12 });
-      askResult.innerHTML = `<p>Results for: <strong>${query}</strong></p>`;
-      askResult.appendChild(renderAskImages(imgs));
-      return;
-    }
-
-    // 3) Otherwise → normal KB answer
-    const r = await fetch(`${API_BASE}/api/ai-expert`, {
-      method:'POST', headers:{'Content-Type':'application/json'},
-      body: JSON.stringify({ question: q })
-    });
-    const j = await r.json();
-    if (!r.ok) throw new Error(j.error || 'AI error');
-    askResult.innerHTML = (j.answer || '').replace(/\n/g,'<br>');
-  } catch (e){
-    askResult.textContent = e.message || 'Something went wrong.';
-  }
+const deepinfraProvider = createDeepInfra({
+  apiKey: process.env.DEEPINFRA_TOKEN
 });
+const CHAT_MODEL_ID = 'google/gemma-2-9b-it';       // same model as chat (can use a big model for best answer)
+const EMBED_MODEL_ID = 'BAAI/bge-large-en-v1.5';    // embedding model
+
+const SYSTEM_PROMPT = "You are a Q&A assistant. Answer the question based on the provided context. If you don't know, say you are unsure.";
+
+export default async function handler(req, res) {
+  if (req.method !== 'GET' && req.method !== 'POST') {
+    res.status(405).send('Method Not Allowed');
+    return;
+  }
+  try {
+    const question = req.query.q || req.body?.question || req.body?.q;
+    const userId = req.body?.userId || req.query.userId || null;
+    if (!question) {
+      res.status(400).json({ error: "No question provided." });
+      return;
+    }
+    // Retrieve relevant context from documents
+    let contextText = "";
+    const embedRes = await embed({
+      model: deepinfraProvider.textEmbedding(EMBED_MODEL_ID),
+      value: question
+    });
+    const qEmbedding = embedRes.embedding;
+    const relevantChunks = await getRelevantDocs(userId, qEmbedding, 3);
+    if (relevantChunks.length > 0) {
+      contextText = relevantChunks.join("\n---\n");
+    }
+    // Form the prompt for the model
+    const messages = [];
+    messages.push({ role: 'system', content: SYSTEM_PROMPT });
+    if (contextText) {
+      messages.push({ role: 'system', content: "Context:\n" + contextText });
+    }
+    messages.push({ role: 'user', content: question });
+    // Get the answer (not streaming for single-turn Q&A)
+    const response = await generateText({
+      model: deepinfraProvider(CHAT_MODEL_ID),
+      messages
+    });
+    const answer = response.text.trim();
+    res.status(200).json({ answer });
+  } catch (err) {
+    console.error("Error in ask:", err);
+    res.status(500).json({ error: "Failed to answer question: " + err.message });
+  }
+}
