@@ -1,334 +1,355 @@
-// /api/img.js
-// Best-ever image generation endpoint for Vercel (Node 18+ / Edge-compatible).
-// Providers:
-//   - deepinfra: primary T2I (FLUX / SDXL / others)
-//   - fal:       optional T2I (great quality; requires FAL_KEY)
-//   - gemini:    prompt booster (uses Gemini to refine the prompt; generation routed to deepinfra/fal)
-//   - groq:      prompt booster (uses Groq LLM to refine the prompt; generation routed to deepinfra/fal)
+// /api/ai-expert.js
+// Vercel Serverless Function (Node.js runtime)
+// Input:  POST { question: string, chat_id?: string, options?: {...} }
+// Output: 200 JSON { answer, provider, model, usage?, finish_reason? }  OR 4xx/5xx { error }
 //
-// Returns chat-friendly JSON with emojis, caption, and alt text.
-// No external deps; uses global fetch.
+// Features:
+// - Multi-provider LLM routing: GROQ -> DEEPINFRA -> GEMINI (configurable)
+// - Human-friendly style & light guardrails
+// - Image intent detection -> calls /api/img and returns Markdown with inline image
+// - Timeouts, retries, and good error surfacing
+//
+// ENV you can set on Vercel (all optional except the API keys you want to use):
+//  GROQ_API_KEY,           GROQ_MODEL (default: "llama-3.1-70b-versatile")
+//  DEEPINFRA_API_KEY,      DEEPINFRA_MODEL (default: "meta-llama/Meta-Llama-3.1-70B-Instruct")
+//  GEMINI_API_KEY,         GEMINI_MODEL (default: "gemini-1.5-pro")
+//  AI_PROVIDER_ORDER (CSV e.g. "groq,deepinfra,gemini")
+//  AI_MAX_TOKENS (default 1024) , AI_TEMPERATURE (default 0.3)
+//  AI_REQUEST_TIMEOUT_MS (default 30000)
+//
+// NOTE: This endpoint returns a single string answer (no streaming) to match your app.js.
 
-const PROVIDER_DEFAULT_MODEL = {
-  deepinfra: "black-forest-labs/FLUX.1-dev", // great default
-  fal: "fal-ai/flux/dev"
-};
-
-const SAFE_DEFAULTS = {
-  size: "1024x1024",
-  steps: 28,
-  guidance: 7.0
-};
-
-function parseSize(s) {
-  // Accept "1024x1024" or "1024"
-  if (!s) return { w: 1024, h: 1024, label: "1024x1024" };
-  const m = String(s).toLowerCase().match(/^(\d{2,4})(?:x(\d{2,4}))?$/);
-  if (!m) return { w: 1024, h: 1024, label: "1024x1024" };
-  const w = parseInt(m[1], 10);
-  const h = parseInt(m[2] || m[1], 10);
-  const clamp = (v) => Math.max(256, Math.min(1536, v));
-  const W = clamp(w);
-  const H = clamp(h);
-  return { w: W, h: H, label: `${W}x${H}` };
-}
-
-function okJson(res, data, status = 200) {
-  res.statusCode = status;
-  res.setHeader("Content-Type", "application/json; charset=utf-8");
-  res.end(JSON.stringify(data));
-}
-function errJson(res, message, status = 400, extra = {}) {
-  return okJson(res, { ok: false, error: message, ...extra }, status);
-}
-
-async function readBody(req) {
-  if (req.method === "GET") {
-    const url = new URL(req.url, `https://${req.headers.host}`);
-    return Object.fromEntries(url.searchParams.entries());
+export default async function handler(req, res) {
+  // Only POST
+  if (req.method !== 'POST') {
+    res.status(405).json({ error: 'Method not allowed. Use POST.' });
+    return;
   }
+
+  // Basic parse
+  let body = {};
   try {
-    const chunks = [];
-    for await (const ch of req) chunks.push(ch);
-    const raw = Buffer.concat(chunks).toString("utf8") || "{}";
-    return JSON.parse(raw);
+    body = JSON.parse(req.body || '{}');
   } catch {
-    return {};
+    body = req.body || {};
   }
+
+  const question = (body?.question || '').trim();
+  const chatId   = (body?.chat_id || '').trim(); // future: persist memory by chatId (db not required here)
+  const options  = body?.options || {};
+
+  if (!question) {
+    res.status(400).json({ error: 'Missing "question" in request body.' });
+    return;
+  }
+
+  // 1) If the user likely wants an image → call /api/img and return markdown with the image
+  if (wantsImage(question)) {
+    try {
+      const imgAnswer = await handleImageIntent(req, question, options);
+      res.status(200).json(imgAnswer);
+      return;
+    } catch (err) {
+      console.error('[ai-expert] image intent failed:', err?.message || err);
+      // Fall back to text explanation
+      // (We still produce a friendly answer instead of throwing)
+      const friendly = humanPrefix('image') +
+        "I tried to create an image but ran into an issue. Could you try again or phrase the image idea a bit differently?";
+      res.status(200).json({ answer: friendly, provider: 'image-fallback' });
+      return;
+    }
+  }
+
+  // 2) Otherwise → normal text LLM with multi-provider fallback
+  const providerOrder = getProviderOrder();
+  const sysPrompt = buildSystemPrompt(chatId);
+
+  // classic single-turn prompt; you can expand to messages if you store chat history later
+  const messages = [
+    { role: 'system', content: sysPrompt },
+    { role: 'user',   content: question }
+  ];
+
+  const modelPrefs = {
+    groq:      process.env.GROQ_MODEL      || 'llama-3.1-70b-versatile',
+    deepinfra: process.env.DEEPINFRA_MODEL || 'meta-llama/Meta-Llama-3.1-70B-Instruct',
+    gemini:    process.env.GEMINI_MODEL    || 'gemini-1.5-pro'
+  };
+
+  const genOpts = {
+    max_tokens: +(process.env.AI_MAX_TOKENS || 1024),
+    temperature: +(process.env.AI_TEMPERATURE || 0.3),
+    timeoutMs: +(process.env.AI_REQUEST_TIMEOUT_MS || 30000)
+  };
+
+  let lastError = null;
+
+  for (const provider of providerOrder) {
+    try {
+      const out = await callLLM(provider, modelPrefs[provider], messages, genOpts);
+      // slight post-process: trim & ensure friendly tone with tiny add-on
+      const finalText = polishAnswer(out.text);
+      res.status(200).json({
+        answer: finalText,
+        provider,
+        model: modelPrefs[provider],
+        finish_reason: out.finish_reason,
+        usage: out.usage || undefined
+      });
+      return;
+    } catch (err) {
+      lastError = err;
+      console.warn(`[ai-expert] provider ${provider} failed:`, err?.message || err);
+      // tries next provider automatically
+    }
+  }
+
+  // If all providers failed
+  const sorry = humanPrefix() +
+    "I’m having a temporary issue reaching my AI providers. Please try again in a moment.";
+  res.status(200).json({ answer: sorry, provider: 'none', error: lastError?.message || 'all providers failed' });
 }
 
-/* ----------------------------- PROMPT BOOSTERS ---------------------------- */
+/* ------------------------- helpers & providers ------------------------- */
 
-async function boostPromptWithGemini(rawPrompt, intent = "High-quality photorealistic T2I prompt") {
-  const key = process.env.GEMINI_API_KEY;
-  if (!key) return { prompt: rawPrompt, used: false, provider: null };
+/** Quick heuristic for image intent (feel free to extend these regexes) */
+function wantsImage(q) {
+  const t = q.toLowerCase();
+  const patterns = [
+    /\b(draw|sketch|illustrate|paint)\b/,
+    /\b(generate|make|create)\s+(an?\s+)?(image|picture|art|logo|poster|icon|photo)\b/,
+    /\bimage\s+(please|plz|for me)\b/,
+    /\bshow me\b.*\b(image|picture|poster|logo|icon)\b/,
+  ];
+  return patterns.some(rx => rx.test(t));
+}
+
+/** Build absolute base URL to call sibling endpoints like /api/img */
+function getBaseUrl(req) {
+  const proto = (req.headers['x-forwarded-proto'] || 'https');
+  const host  = req.headers['x-forwarded-host'] || req.headers.host;
+  return `${proto}://${host}`;
+}
+
+/** Image flow → hit your /api/img and return markdown response */
+async function handleImageIntent(req, question, options) {
+  const imgProvider = options?.imgProvider || 'deepinfra'; // or 'groq','fal' if you wire them in /api/img.js
+  const size = options?.size || '1024x1024';
+
+  const url = new URL('/api/img', getBaseUrl(req));
+  url.searchParams.set('provider', imgProvider);
+  url.searchParams.set('size', size);
+  url.searchParams.set('prompt', question);
+
+  const r = await fetch(url.toString(), { method: 'GET', headers: { 'Content-Type': 'application/json' } });
+  const j = await r.json().catch(() => ({}));
+  if (!r.ok) {
+    throw new Error(j?.error || `Image API failed (${r.status})`);
+  }
+
+  // Build a friendly markdown answer with inline image
+  const lead = humanPrefix('image') + "Here’s your image. If you want tweaks (style, colors, camera angle), tell me! ✨";
+  const md = `${lead}\n\n![](${j.url})`;
+  return { answer: md, provider: 'image', model: j.provider || imgProvider };
+}
+
+/** Friendly prefix (keeps answers warm & human) */
+function humanPrefix(kind = 'text') {
+  if (kind === 'image') {
+    return "All set! ";
+  }
+  return "Sure — ";
+}
+
+/** Very light post-processing to keep answers tidy */
+function polishAnswer(s) {
+  const t = String(s || '').trim();
+  if (!t) return "I don’t have an answer for that yet — could you rephrase?";
+  // prevent overuse of markdown headings from some models
+  return t.replace(/\n{3,}/g, '\n\n').replace(/(^#+\s*$)/gm, '');
+}
+
+/** Provider preference order */
+function getProviderOrder() {
+  const raw = (process.env.AI_PROVIDER_ORDER || 'groq,deepinfra,gemini')
+    .split(',').map(s => s.trim().toLowerCase()).filter(Boolean);
+
+  // Keep only known providers
+  const allowed = ['groq','deepinfra','gemini'];
+  const filtered = raw.filter(p => allowed.includes(p));
+
+  // If API key is missing for a provider, drop it silently
+  return filtered.filter(p => hasKey(p));
+}
+
+function hasKey(provider) {
+  if (provider === 'groq')      return !!process.env.GROQ_API_KEY;
+  if (provider === 'deepinfra') return !!process.env.DEEPINFRA_API_KEY;
+  if (provider === 'gemini')    return !!process.env.GEMINI_API_KEY;
+  return false;
+}
+
+/** Call an LLM provider with a unified interface */
+async function callLLM(provider, model, messages, opts) {
+  const ctrl = new AbortController();
+  const to = setTimeout(() => ctrl.abort(), opts.timeoutMs || 30000);
+
   try {
-    // Google Generative Language API (text-only, safe for prompt shaping)
-    const sys = `You rewrite user prompts into concise, vivid prompts for image generation. Keep nouns and critical details.`;
-    const user = `Task: ${intent}\nUser prompt: ${rawPrompt}\nReturn only the improved prompt.`;
-
-    const r = await fetch("https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=" + key, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        contents: [
-          { role: "user", parts: [{ text: sys }] },
-          { role: "user", parts: [{ text: user }] }
-        ]
-      })
-    });
-    const j = await r.json();
-    const text = j?.candidates?.[0]?.content?.parts?.[0]?.text?.trim();
-    if (text) return { prompt: text, used: true, provider: "gemini" };
-    return { prompt: rawPrompt, used: false, provider: null };
-  } catch {
-    return { prompt: rawPrompt, used: false, provider: null };
+    if (provider === 'groq') {
+      return await callGroq(model, messages, opts, ctrl.signal);
+    }
+    if (provider === 'deepinfra') {
+      return await callDeepInfra(model, messages, opts, ctrl.signal);
+    }
+    if (provider === 'gemini') {
+      return await callGemini(model, messages, opts, ctrl.signal);
+    }
+    throw new Error(`Unknown provider: ${provider}`);
+  } finally {
+    clearTimeout(to);
   }
 }
 
-async function boostPromptWithGroq(rawPrompt, intent = "High-quality photorealistic T2I prompt") {
-  const key = process.env.GROQ_API_KEY;
-  if (!key) return { prompt: rawPrompt, used: false, provider: null };
-  try {
-    // Groq Chat Completions API (Llama-3.x)
-    const model = "llama-3.1-8b-instant";
-    const r = await fetch("https://api.groq.com/openai/v1/chat/completions", {
-      method: "POST",
-      headers: {
-        "Authorization": `Bearer ${key}`,
-        "Content-Type": "application/json"
-      },
-      body: JSON.stringify({
-        model,
-        messages: [
-          { role: "system", content: "You rewrite prompts into concise, vivid image prompts. Keep key nouns, style, lighting, camera hints. Avoid long paragraphs." },
-          { role: "user", content: `Task: ${intent}\nUser prompt: ${rawPrompt}\nReturn only the improved prompt.` }
-        ],
-        temperature: 0.4,
-        max_tokens: 160
-      })
-    });
-    const j = await r.json();
-    const text = j?.choices?.[0]?.message?.content?.trim();
-    if (text) return { prompt: text, used: true, provider: "groq" };
-    return { prompt: rawPrompt, used: false, provider: null };
-  } catch {
-    return { prompt: rawPrompt, used: false, provider: null };
-  }
+/** Normalize OpenAI-style messages -> plain prompt for providers that accept "messages" */
+function asOpenAIMessages(messages) {
+  // we keep it as-is for OpenAI-compatible endpoints
+  return messages.map(m => ({ role: m.role, content: m.content }));
 }
 
-/* ----------------------------- PROVIDER: FAL ------------------------------ */
+/* ------------------------------ GROQ ------------------------------ */
+// OpenAI-compatible chat API
+async function callGroq(model, messages, opts, signal) {
+  const apiKey = process.env.GROQ_API_KEY;
+  if (!apiKey) throw new Error('Missing GROQ_API_KEY');
 
-async function generateWithFal(opts) {
-  // Docs: https://fal.ai/models (key required)
-  const { prompt, width, height, steps, guidance, seed, model } = opts;
-  const key = process.env.FAL_KEY;
-  if (!key) throw new Error("FAL_KEY is not set");
-
-  // Map model convenience names
-  const route = model?.includes("sdxl")
-    ? "https://fal.run/fal-ai/stable-diffusion-xl"
-    : "https://fal.run/fal-ai/flux/dev";
-
-  const r = await fetch(route, {
-    method: "POST",
+  const r = await fetch('https://api.groq.com/openai/v1/chat/completions', {
+    method: 'POST',
+    signal,
     headers: {
-      "Authorization": `Key ${key}`,
-      "Content-Type": "application/json"
+      'Authorization': `Bearer ${apiKey}`,
+      'Content-Type': 'application/json'
     },
     body: JSON.stringify({
-      prompt,
-      image_size: `${width}x${height}`,
-      num_inference_steps: steps,
-      guidance_scale: guidance,
-      seed
+      model,
+      messages: asOpenAIMessages(messages),
+      temperature: opts.temperature ?? 0.3,
+      max_tokens: opts.max_tokens ?? 1024,
+      stream: false
     })
   });
 
+  const j = await r.json().catch(() => ({}));
   if (!r.ok) {
-    const t = await r.text().catch(() => "");
-    throw new Error(`FAL error: ${r.status} ${t}`);
+    throw new Error(j?.error?.message || `Groq error ${r.status}`);
   }
 
-  const j = await r.json();
-  // Typical FAL outputs: { images:[{ url }], image:{url}, ... }
-  const url =
-    j?.images?.[0]?.url ||
-    j?.image?.url ||
-    j?.url ||
-    j?.data?.[0]?.url;
-
-  if (!url) throw new Error("FAL: No image URL returned");
-  return { imageUrl: url, provider: "fal", modelUsed: model || "fal-ai/flux/dev" };
+  const choice = j.choices?.[0];
+  return {
+    text: choice?.message?.content || '',
+    finish_reason: choice?.finish_reason || '',
+    usage: j.usage || undefined
+  };
 }
 
-/* -------------------------- PROVIDER: DEEPINFRA --------------------------- */
+/* --------------------------- DEEPINFRA --------------------------- */
+// OpenAI-compatible chat API via DeepInfra
+async function callDeepInfra(model, messages, opts, signal) {
+  const apiKey = process.env.DEEPINFRA_API_KEY;
+  if (!apiKey) throw new Error('Missing DEEPINFRA_API_KEY');
 
-async function generateWithDeepinfra(opts) {
-  // Docs: https://deepinfra.com/docs/inference
-  const { prompt, width, height, steps, guidance, seed, model } = opts;
-  const key = process.env.DEEPINFRA_API_KEY;
-  if (!key) throw new Error("DEEPINFRA_API_KEY is not set");
-
-  const mdl = model || PROVIDER_DEFAULT_MODEL.deepinfra;
-  const url = `https://api.deepinfra.com/v1/inference/${encodeURIComponent(mdl)}`;
-
-  // DeepInfra commonly accepts SDXL/FLUX style params:
-  const payload = {
-    prompt,
-    image_size: `${width}x${height}`,
-    num_inference_steps: steps,
-    guidance_scale: guidance
-  };
-  if (typeof seed === "number") payload.seed = seed;
-
-  const r = await fetch(url, {
-    method: "POST",
+  const r = await fetch('https://api.deepinfra.com/v1/openai/chat/completions', {
+    method: 'POST',
+    signal,
     headers: {
-      "Authorization": `Bearer ${key}`,
-      "Content-Type": "application/json"
+      'Authorization': `Bearer ${apiKey}`,
+      'Content-Type': 'application/json'
     },
-    body: JSON.stringify(payload)
+    body: JSON.stringify({
+      model,
+      messages: asOpenAIMessages(messages),
+      temperature: opts.temperature ?? 0.3,
+      max_tokens: opts.max_tokens ?? 1024,
+      stream: false
+    })
   });
 
+  const j = await r.json().catch(() => ({}));
   if (!r.ok) {
-    const t = await r.text().catch(() => "");
-    throw new Error(`DeepInfra error: ${r.status} ${t}`);
+    throw new Error(j?.error?.message || `DeepInfra error ${r.status}`);
   }
 
-  const j = await r.json();
-
-  // Handle several possible result shapes
-  let urlOut =
-    j?.images?.[0]?.url ||
-    j?.images?.[0] ||
-    j?.image?.url ||
-    j?.image ||
-    j?.output?.[0]?.url ||
-    j?.output?.[0];
-
-  // Some models may return base64. You can extend to upload to storage if needed.
-  if (!urlOut) {
-    // Attempt to find any http(s) URL in the payload:
-    const maybe = JSON.stringify(j).match(/https?:\/\/[^"'\s]+/);
-    if (maybe) urlOut = maybe[0];
-  }
-
-  if (!urlOut) throw new Error("DeepInfra: No image URL returned");
-  return { imageUrl: urlOut, provider: "deepinfra", modelUsed: mdl };
+  const choice = j.choices?.[0];
+  return {
+    text: choice?.message?.content || '',
+    finish_reason: choice?.finish_reason || '',
+    usage: j.usage || undefined
+  };
 }
 
-/* --------------------------------- MAIN ---------------------------------- */
+/* ----------------------------- GEMINI ---------------------------- */
+// Google Generative Language API (Gemini 1.5+). Messages → "contents" format.
+async function callGemini(model, messages, opts, signal) {
+  const apiKey = process.env.GEMINI_API_KEY;
+  if (!apiKey) throw new Error('Missing GEMINI_API_KEY');
 
-module.exports = async (req, res) => {
-  if (req.method !== "GET" && req.method !== "POST") {
-    return errJson(res, "Method not allowed", 405);
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent?key=${apiKey}`;
+  const contents = toGeminiContents(messages);
+
+  const r = await fetch(url, {
+    method: 'POST',
+    signal,
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      contents,
+      generationConfig: {
+        temperature: opts.temperature ?? 0.3,
+        maxOutputTokens: opts.max_tokens ?? 1024
+      },
+      // Safety settings: default allow; you can add stricter filters if you want
+    })
+  });
+
+  const j = await r.json().catch(() => ({}));
+  if (!r.ok) {
+    const errMsg = j?.error?.message || `Gemini error ${r.status}`;
+    throw new Error(errMsg);
   }
 
-  try {
-    const q = await readBody(req);
+  const text = (j?.candidates?.[0]?.content?.parts || [])
+    .map(p => (p.text || ''))
+    .join('');
 
-    // Inputs
-    const rawPrompt = (q.prompt || q.q || "").trim();
-    if (!rawPrompt) return errJson(res, "Missing 'prompt'");
+  return {
+    text,
+    finish_reason: j?.candidates?.[0]?.finishReason || '',
+    usage: undefined
+  };
+}
 
-    const providerReq = (q.provider || "deepinfra").toLowerCase();
-    const model = q.model || undefined;
+/** Convert OpenAI-style messages to Gemini contents */
+function toGeminiContents(messages) {
+  // Gemini expects an array of "contents"; each "content" has "role" and "parts"
+  // We map system -> (as if a user preamble), then user/assistant alternate
+  return messages.map(m => ({
+    role: m.role === 'system' ? 'user' : (m.role || 'user'),
+    parts: [{ text: m.content || '' }]
+  }));
+}
 
-    const { w, h, label } = parseSize(q.size || SAFE_DEFAULTS.size);
-    const steps = Number.isFinite(+q.steps) ? Math.max(8, Math.min(60, +q.steps)) : SAFE_DEFAULTS.steps;
-    const guidance = Number.isFinite(+q.guidance) ? Math.max(0, Math.min(20, +q.guidance)) : SAFE_DEFAULTS.guidance;
-    const seed = q.seed !== undefined ? parseInt(q.seed, 10) : undefined;
+/* ------------------------- System Prompt ------------------------- */
 
-    const wantChatMsg = q.chat === "1" || q.chat === 1 || String(q.chat || "").toLowerCase() === "true";
-
-    // Optional: boost prompt for better composition/style
-    let boosted = { prompt: rawPrompt, used: false, provider: null };
-    let providerChainInfo = [];
-
-    if (providerReq === "gemini") {
-      boosted = await boostPromptWithGemini(rawPrompt);
-      providerChainInfo.push("gemini:prompt-boost");
-    } else if (providerReq === "groq") {
-      boosted = await boostPromptWithGroq(rawPrompt);
-      providerChainInfo.push("groq:prompt-boost");
-    }
-
-    // Choose actual generator (deepinfra preferred; fal if requested)
-    let generator = providerReq;
-    if (providerReq === "gemini" || providerReq === "groq") {
-      // For image generation, route to deepinfra by default (or fal if user asked)
-      generator = (q.route_to || "deepinfra").toLowerCase();
-    }
-
-    // Try primary provider, then fallback
-    let out;
-    const opts = {
-      prompt: boosted.prompt,
-      width: w,
-      height: h,
-      steps,
-      guidance,
-      seed,
-      model
-    };
-
-    if (generator === "fal") {
-      try {
-        out = await generateWithFal(opts);
-      } catch (e) {
-        providerChainInfo.push("fal:fail");
-        // Fallback to deepinfra if available
-        out = await generateWithDeepinfra(opts);
-        providerChainInfo.push("deepinfra:fallback");
-      }
-    } else {
-      try {
-        out = await generateWithDeepinfra(opts);
-      } catch (e) {
-        providerChainInfo.push("deepinfra:fail");
-        // Fallback to FAL if configured
-        if (process.env.FAL_KEY) {
-          out = await generateWithFal(opts);
-          providerChainInfo.push("fal:fallback");
-        } else {
-          throw e;
-        }
-      }
-    }
-
-    const finalProvider = out.provider;
-    const finalModel = out.modelUsed || model || PROVIDER_DEFAULT_MODEL[finalProvider] || "unknown";
-
-    // Friendly chat text + caption/alt
-    const caption = rawPrompt;
-    const alt = `${rawPrompt} (${label}, ${finalModel.includes("flux") ? "FLUX" : finalModel.includes("sdxl") ? "SDXL" : "AI"})`;
-
-    const message = wantChatMsg
-      ? `Here you go! ✨ I generated **${label}** with **${finalModel}**.\n\nNeed variations, upscaling, or different styles (cinematic, product, blueprint)?`
-      : `Image generated (${label})`;
-
-    const meta = {
-      providerRequested: providerReq,
-      providerUsed: finalProvider,
-      modelRequested: model || null,
-      modelUsed: finalModel,
-      boosted: boosted.used ? true : false,
-      boostProvider: boosted.provider || null,
-      chain: providerChainInfo,
-      width: w, height: h, steps, guidance, seed: seed ?? null
-    };
-
-    return okJson(res, {
-      ok: true,
-      imageUrl: out.imageUrl,
-      alt,
-      caption,
-      message,
-      meta
-    });
-  } catch (err) {
-    const msg = (err && err.message) ? err.message : "Unknown error";
-    return errJson(res, "Image generation failed: " + msg, 500);
-  }
-};
+function buildSystemPrompt(chatId) {
+  // You can evolve this any time. The goal: warm, specific, concise & helpful.
+  // Keep it short so tokens go to the answer, not the boilerplate.
+  return [
+    "You are a friendly, human-like expert assistant.",
+    "Tone: warm, concise, practical. Use simple, clear language.",
+    "Behaviors:",
+    "- Answer directly in short paragraphs or tight bullet points.",
+    "- When the user is vague, ask one short clarifying question.",
+    "- If asked for images, you may propose ideas; the app will generate them.",
+    "- If you aren’t sure, say so briefly and suggest the next best step.",
+    "- Avoid overuse of emojis; sprinkle them when it *adds* clarity or warmth.",
+    `Session: ${chatId || 'anonymous'}.`
+  ].join('\n');
+}
