@@ -1,31 +1,22 @@
-// api/docs.json.js — return the persisted docs store
-export const config = { runtime: "nodejs18.x" };
+// api/docs.json.js – Returns the list of documents (knowledge base entries) for the user.
+const { listDocuments } = require('../db');
 
-import { list } from "@vercel/blob";
-
-function headers() {
-  return {
-    "Access-Control-Allow-Origin": "*",
-    "Content-Type": "application/json; charset=utf-8",
-    "Cache-Control": "no-store"
-  };
-}
-
-export default async function handler(_req, res) {
+export default async function handler(req, res) {
+  if (req.method !== 'GET') {
+    res.status(405).send('Method Not Allowed');
+    return;
+  }
   try {
-    const lst = await list({ prefix: "docs/" });
-    const hit = lst.blobs.find(b => b.pathname === "docs/docs.json");
-    if (!hit) {
-      res.writeHead(200, headers());
-      res.end(JSON.stringify({ docs: [] }));
-      return;
+    const userId = req.query.userId || (req.headers['x-user-id'] || null);
+    if (!userId) {
+      // If no user specified, we could either return all public docs or an error.
+      // For now, require authentication.
+      return res.status(401).json({ error: "Unauthorized" });
     }
-    const r = await fetch(hit.url);
-    const j = await r.json();
-    res.writeHead(200, headers());
-    res.end(JSON.stringify(j && j.docs ? j : { docs: [] }));
-  } catch (e) {
-    res.writeHead(500, headers());
-    res.end(JSON.stringify({ error: e?.message || "Server error" }));
+    const docs = await listDocuments(userId);
+    res.status(200).json({ documents: docs });
+  } catch (err) {
+    console.error("Error fetching docs list:", err);
+    res.status(500).json({ error: "Failed to list documents: " + err.message });
   }
 }
