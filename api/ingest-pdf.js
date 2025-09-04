@@ -1,134 +1,109 @@
-// api/ingest-pdf.js — Ingest a PDF by URL → chunk → persist to Vercel Blob
-export const config = { runtime: "nodejs18.x" };
+// api/ingest-pdf.js – Accepts a PDF (via upload or URL), extracts text, splits into chunks, and stores in the knowledge base.
+const pdfParse = require('pdf-parse');
+const { pool, deleteDocument } = require('../db');
+import { createDeepInfra } from '@ai-sdk/deepinfra';
+import { embed } from 'ai';
 
-import { put, list } from "@vercel/blob";
-import pdfParse from "pdf-parse";
+const deepinfraProvider = createDeepInfra({
+  apiKey: process.env.DEEPINFRA_TOKEN
+});
+const EMBED_MODEL_ID = 'BAAI/bge-large-en-v1.5';  // embedding model (must match vector dimension in DB)
 
-/* ---------- tiny utils ---------- */
-function cors(origin) {
-  return {
-    "Access-Control-Allow-Origin": origin || "*",
-    "Access-Control-Allow-Methods": "POST, OPTIONS",
-    "Access-Control-Allow-Headers": "Content-Type, Authorization",
-    "Content-Type": "application/json; charset=utf-8",
-    "Cache-Control": "no-store",
-  };
-}
-
-// Convert GitHub “blob/…” → raw.githubusercontent.com/…
-function toRawGitHub(u) {
-  try {
-    const url = new URL(u);
-    if (url.hostname === "github.com" && url.pathname.includes("/blob/")) {
-      const parts = url.pathname.split("/").filter(Boolean);
-      // /{user}/{repo}/blob/{sha}/{path...}
-      const user = parts[0], repo = parts[1], sha = parts[3];
-      const rest = parts.slice(4).join("/");
-      return `https://raw.githubusercontent.com/${user}/${repo}/${sha}/${rest}`;
-    }
-    return u;
-  } catch { return u; }
-}
-
-// Clean & chunk long text into overlapping slices
-function chunkText(text, { maxChars = 1800, overlap = 200 } = {}) {
-  const t = (text || "").replace(/\u0000/g, "").trim();
-  if (t.length <= maxChars) return [t];
-  const out = [];
-  let i = 0;
-  while (i < t.length) {
-    const slice = t.slice(i, i + maxChars);
-    out.push(slice);
-    i += (maxChars - overlap);
-  }
-  return out;
-}
-
-// Load docs.json from Vercel Blob (if exists), otherwise {docs:[]}
-async function loadStore() {
-  const lst = await list({ prefix: "docs/" });
-  const hit = lst.blobs.find(b => b.pathname === "docs/docs.json");
-  if (!hit) return { docs: [] };
-  try {
-    const r = await fetch(hit.url);
-    const j = await r.json();
-    return j && Array.isArray(j.docs) ? j : { docs: [] };
-  } catch { return { docs: [] }; }
-}
-
-// Save docs.json back to Blob (public, stable path)
-async function saveStore(data) {
-  const body = JSON.stringify(data, null, 2);
-  const res = await put("docs/docs.json", body, {
-    access: "public",
-    contentType: "application/json; charset=utf-8",
-    addRandomSuffix: false
-  });
-  return res.url; // public URL of the JSON
-}
-
-/* ---------- handler ---------- */
 export default async function handler(req, res) {
-  const origin = req.headers.origin || "*";
-  if (req.method === "OPTIONS") { res.writeHead(204, cors(origin)); res.end(); return; }
-  if (req.method !== "POST")    { res.writeHead(405, cors(origin)); res.end(JSON.stringify({ error:"Only POST allowed" })); return; }
-
+  if (req.method !== 'POST') {
+    res.status(405).send('Method Not Allowed');
+    return;
+  }
   try {
-    const { url, title = "", docId = "" } = req.body || {};
-    if (!url || !docId) {
-      res.writeHead(400, cors(origin));
-      res.end(JSON.stringify({ error: "Missing url or docId" }));
+    const userId = req.query.userId || req.body?.userId || (req.headers['x-user-id'] || null);
+    let pdfBuffer = null;
+    let filename = null;
+    // If content is sent directly in the request body (binary PDF data)
+    if (req.headers['content-type'] && req.headers['content-type'].includes('application/pdf')) {
+      // Read the raw PDF data from the request stream
+      const chunks = [];
+      for await (const chunk of req) { chunks.push(chunk); }
+      pdfBuffer = Buffer.concat(chunks);
+      // If filename is provided in query (from form), capture it
+      if (req.query.filename) {
+        filename = req.query.filename;
+      }
+    } else if (req.body?.file) {
+      // If the PDF is base64-encoded or passed as `file` in JSON (less likely), handle that
+      const data = req.body.file;
+      // Assuming it's base64 string
+      pdfBuffer = Buffer.from(data, 'base64');
+      filename = req.body.filename || 'document.pdf';
+    } else if (req.body?.url || req.query.url) {
+      // If a URL to the PDF is provided, fetch it
+      const pdfUrl = req.body.url || req.query.url;
+      const fetchRes = await fetch(pdfUrl);
+      if (!fetchRes.ok) throw new Error("Failed to fetch PDF from URL");
+      pdfBuffer = Buffer.from(await fetchRes.arrayBuffer());
+      filename = pdfUrl.split('/').pop() || 'document.pdf';
+    } else {
+      res.status(400).json({ error: "No PDF file or URL provided." });
       return;
     }
 
-    const fetchUrl = toRawGitHub(url);
-    const pdfRes = await fetch(fetchUrl);
-    if (!pdfRes.ok) {
-      res.writeHead(400, cors(origin));
-      res.end(JSON.stringify({ error: `Failed to fetch PDF: HTTP ${pdfRes.status}` }));
+    // Parse PDF to extract text
+    const data = await pdfParse(pdfBuffer);
+    let text = data.text.trim();
+    if (!text) {
+      res.status(400).json({ error: "PDF contains no extractable text." });
       return;
     }
+    // Optionally, limit size to avoid extremely large texts (could implement a cutoff or summarization for very large PDFs).
+    if (text.length > 1000000) {  // if >1M characters, let's truncate for now (or you could split across multiple docs or summarize).
+      text = text.slice(0, 1000000);
+    }
 
-    const ab = await pdfRes.arrayBuffer();
-    const buffer = Buffer.from(ab);
-    const parsed = await pdfParse(buffer);
+    // Insert a new document record in the DB
+    const docName = filename ? filename.replace(/\.pdf$/i, '') : `Document_${Date.now()}`;
+    const docInsertRes = await pool.query(
+      `INSERT INTO documents(user_id, name) VALUES($1, $2) RETURNING id`, 
+      [userId, docName]
+    );
+    const docId = docInsertRes.rows[0].id;
 
-    // Basic chunking (you can tune sizes)
-    const chunks = chunkText(parsed.text, { maxChars: 1800, overlap: 220 });
+    // Split text into chunks
+    const CHUNK_SIZE = 1000;  // characters per chunk (should align with ~512 tokens as configured)
+    const chunks = [];
+    // Simple split by paragraphs for now:
+    const paragraphs = text.split(/\n\s*\n/);
+    for (let para of paragraphs) {
+      para = para.trim();
+      if (!para) continue;
+      if (para.length <= CHUNK_SIZE) {
+        chunks.push(para);
+      } else {
+        // Break long paragraph into smaller chunks
+        for (let i = 0; i < para.length; i += CHUNK_SIZE) {
+          const subText = para.slice(i, i + CHUNK_SIZE);
+          chunks.push(subText);
+        }
+      }
+    }
 
-    // Load, replace any old entries with same docId, then save
-    const store = await loadStore();
-    const prefix = `${docId}::`;
-    const filtered = (store.docs || []).filter(d => !String(d.id || "").startsWith(prefix));
+    // Embed each chunk and store in database
+    for (const chunkText of chunks) {
+      // Generate embedding vector for the chunk
+      const embedRes = await embed({
+        model: deepinfraProvider.textEmbedding(EMBED_MODEL_ID),
+        value: chunkText
+      });
+      const vector = embedRes.embedding;
+      // Prepare vector for SQL insert
+      const vectorStr = '[' + vector.join(',') + ']';
+      await pool.query(
+        `INSERT INTO document_chunks(doc_id, user_id, content, embeddings) VALUES($1, $2, $3, $4::vector)`,
+        [docId, userId, chunkText, vectorStr]
+      );
+    }
 
-    const now = new Date().toISOString();
-    const items = chunks.map((text, i) => ({
-      id: `${docId}::${i + 1}`,
-      docId,
-      title: title || parsed?.info?.Title || "Untitled PDF",
-      text,
-      page: i + 1,          // pseudo "page" (by chunk index)
-      url: fetchUrl,
-      addedAt: now
-    }));
-
-    const next = { docs: filtered.concat(items) };
-    const jsonUrl = await saveStore(next);
-
-    res.writeHead(200, cors(origin));
-    res.end(JSON.stringify({
-      ok: true,
-      meta: {
-        docId,
-        title: title || parsed?.info?.Title || "",
-        pagesDetected: parsed?.numpages || 0,
-        chunks: items.length,
-        storeUrl: jsonUrl
-      },
-      preview: parsed.text.slice(0, 600)
-    }));
+    res.status(200).json({ message: "Document ingested successfully.", documentId: docId });
   } catch (err) {
-    res.writeHead(500, cors(origin));
-    res.end(JSON.stringify({ error: err?.message || "Server error" }));
+    console.error("Error ingesting PDF:", err);
+    res.status(500).json({ error: "Failed to ingest PDF: " + err.message });
   }
 }
