@@ -395,3 +395,265 @@ function buildSystemPrompt(chatId) {
 //       import { createDeepInfra } from '@ai-sdk/deepinfra';
 //       import { embed } from 'ai';
 //       const { detectCommand, SKILL_META } = require('../api/skills');
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+// /api/ai-expert.js  — Node runtime (CommonJS)
+// Friendly, multi-provider AI with CORS + image intent handoff.
+// POST { question: string, chat_id?: string, options?: { imgProvider?, size? } }
+// 200 { answer, provider, model, usage?, finish_reason? }
+
+const DEFAULT_ORDER = ['groq', 'deepinfra', 'gemini'];
+
+/* -------------------- CORS (match /api/ai.js) -------------------- */
+function allowedOrigins() {
+  return (process.env.CORS_ORIGINS || '')
+    .split(',')
+    .map(s => s.trim().replace(/\/+$/, ''))
+    .filter(Boolean);
+}
+function buildCors(origin) {
+  const list = allowedOrigins();
+  const o = (origin || '').replace(/\/+$/, '');
+  const ok = !origin || list.length === 0 || list.includes(o);
+  return {
+    ...(ok ? { 'Access-Control-Allow-Origin': origin || '*' } : {}),
+    'Access-Control-Allow-Headers': 'Content-Type, Authorization',
+    'Access-Control-Allow-Methods': 'POST, OPTIONS',
+    'Cache-Control': 'no-store',
+    'Content-Type': 'application/json; charset=utf-8'
+  };
+}
+
+/* -------------------- HTTP helpers -------------------- */
+function send(res, status, headers, dataObj) {
+  try { res.writeHead(status, headers); } catch(_) {}
+  res.end(JSON.stringify(dataObj));
+}
+function wantsImage(q) {
+  const t = String(q || '').toLowerCase();
+  return [
+    /\b(draw|sketch|illustrate|paint)\b/,
+    /\b(generate|make|create)\s+(an?\s+)?(image|picture|art|logo|poster|icon|photo)\b/,
+    /\bimage\s+(please|plz|for me)\b/,
+    /\bshow me\b.*\b(image|picture|poster|logo|icon)\b/,
+    /^\/gen\b/
+  ].some(rx => rx.test(t));
+}
+function humanPrefix(kind='text'){ return kind === 'image' ? 'All set! ' : 'Sure — '; }
+function polishAnswer(s){
+  const t = String(s || '').trim();
+  if (!t) return 'I don’t have an answer for that yet — could you rephrase?';
+  return t.replace(/\n{3,}/g, '\n\n').replace(/(^#+\s*$)/gm, '');
+}
+function getOrder() {
+  const raw = (process.env.AI_PROVIDER_ORDER || DEFAULT_ORDER.join(','))
+    .split(',').map(s => s.trim().toLowerCase()).filter(Boolean);
+  const allow = ['groq','deepinfra','gemini'];
+  const hasKey = (p) =>
+    (p==='groq'      && !!process.env.GROQ_API_KEY) ||
+    (p==='deepinfra' && !!process.env.DEEPINFRA_API_KEY) ||
+    (p==='gemini'    && !!process.env.GEMINI_API_KEY);
+  return raw.filter(p => allow.includes(p)).filter(hasKey);
+}
+function asOpenAIMessages(messages){
+  return messages.map(m => ({ role: m.role, content: m.content }));
+}
+function toGeminiContents(messages){
+  return messages.map(m => ({
+    role: m.role === 'system' ? 'user' : (m.role || 'user'),
+    parts: [{ text: m.content || '' }]
+  }));
+}
+function buildSystemPrompt(chatId){
+  return [
+    'You are a friendly, human-like expert assistant.',
+    'Tone: warm, concise, practical. Use simple, clear language.',
+    'Behaviors:',
+    '- Answer directly in short paragraphs or tight bullet points.',
+    '- When the user is vague, ask one short clarifying question.',
+    '- If asked for images, propose ideas; the app can generate them.',
+    '- If unsure, say so briefly and suggest the next best step.',
+    '- Use emojis sparingly where it *adds* warmth or clarity.',
+    `Session: ${chatId || 'anonymous'}.`
+  ].join('\n');
+}
+
+/* -------------------- Providers -------------------- */
+async function callGroq(model, messages, opts, signal){
+  const key = process.env.GROQ_API_KEY;
+  if (!key) throw new Error('Missing GROQ_API_KEY');
+
+  const r = await fetch('https://api.groq.com/openai/v1/chat/completions', {
+    method: 'POST',
+    signal,
+    headers: { 'Authorization': `Bearer ${key}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      model,
+      messages: asOpenAIMessages(messages),
+      temperature: opts.temperature ?? 0.3,
+      max_tokens: opts.max_tokens ?? 1024,
+      stream: false
+    })
+  });
+  const j = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(j?.error?.message || `Groq error ${r.status}`);
+  const c = j.choices?.[0];
+  return { text: c?.message?.content || '', finish_reason: c?.finish_reason || '', usage: j.usage };
+}
+async function callDeepInfra(model, messages, opts, signal){
+  const key = process.env.DEEPINFRA_API_KEY;
+  if (!key) throw new Error('Missing DEEPINFRA_API_KEY');
+
+  const r = await fetch('https://api.deepinfra.com/v1/openai/chat/completions', {
+    method: 'POST',
+    signal,
+    headers: { 'Authorization': `Bearer ${key}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      model,
+      messages: asOpenAIMessages(messages),
+      temperature: opts.temperature ?? 0.3,
+      max_tokens: opts.max_tokens ?? 1024,
+      stream: false
+    })
+  });
+  const j = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(j?.error?.message || `DeepInfra error ${r.status}`);
+  const c = j.choices?.[0];
+  return { text: c?.message?.content || '', finish_reason: c?.finish_reason || '', usage: j.usage };
+}
+async function callGemini(model, messages, opts, signal){
+  const key = process.env.GEMINI_API_KEY;
+  if (!key) throw new Error('Missing GEMINI_API_KEY');
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent?key=${key}`;
+  const r = await fetch(url, {
+    method: 'POST',
+    signal,
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      contents: toGeminiContents(messages),
+      generationConfig: { temperature: opts.temperature ?? 0.3, maxOutputTokens: opts.max_tokens ?? 1024 }
+    })
+  });
+  const j = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(j?.error?.message || `Gemini error ${r.status}`);
+  const txt = (j?.candidates?.[0]?.content?.parts || []).map(p => p.text || '').join('');
+  return { text: txt, finish_reason: j?.candidates?.[0]?.finishReason || '', usage: undefined };
+}
+
+/* -------------------- Image handoff -------------------- */
+function baseUrl(req){
+  const proto = req.headers['x-forwarded-proto'] || 'https';
+  const host  = req.headers['x-forwarded-host'] || req.headers.host;
+  return `${proto}://${host}`;
+}
+async function handleImageIntent(req, question, options){
+  const imgProvider = options?.imgProvider || 'deepinfra';
+  const size = options?.size || '1024x1024';
+  const url = new URL('/api/img', baseUrl(req));
+  url.searchParams.set('provider', imgProvider);
+  url.searchParams.set('size', size);
+  url.searchParams.set('prompt', question);
+  url.searchParams.set('chat', '1');
+
+  const r = await fetch(url.toString(), { method: 'GET', headers: { 'Content-Type': 'application/json' } });
+  const j = await r.json().catch(()=> ({}));
+  if (!r.ok || !j?.imageUrl) throw new Error(j?.error || `Image API failed (${r.status})`);
+
+  const lead = humanPrefix('image') + 'Here’s your image. Want tweaks (style, mood, camera angle)? ✨';
+  const md = `${lead}\n\n![](${j.imageUrl})`;
+  return { answer: md, provider: j.meta?.providerUsed || 'image', model: j.meta?.modelUsed || 'image-gen' };
+}
+
+/* -------------------- Dispatcher -------------------- */
+async function callLLM(provider, model, messages, opts){
+  const ac = new AbortController();
+  const t  = setTimeout(() => ac.abort(), opts.timeoutMs || 30000);
+  try {
+    if (provider === 'groq')      return await callGroq(model, messages, opts, ac.signal);
+    if (provider === 'deepinfra') return await callDeepInfra(model, messages, opts, ac.signal);
+    if (provider === 'gemini')    return await callGemini(model, messages, opts, ac.signal);
+    throw new Error(`Unknown provider: ${provider}`);
+  } finally { clearTimeout(t); }
+}
+
+/* -------------------- Handler -------------------- */
+module.exports = async (req, res) => {
+  const headers = buildCors(req.headers.origin || req.headers.Origin);
+  if (req.method === 'OPTIONS') return send(res, 204, headers, null);
+  if (req.method !== 'POST')    return send(res, 405, headers, { error: 'Method not allowed. Use POST.' });
+
+  // parse body
+  let body = {};
+  try { body = typeof req.body === 'string' ? JSON.parse(req.body || '{}') : (req.body || {}); }
+  catch { body = {}; }
+
+  const question = (body?.question || '').trim();
+  const chatId   = (body?.chat_id || '').trim();
+  const options  = body?.options || {};
+  if (!question) return send(res, 400, headers, { error: 'Missing "question".' });
+
+  // Image route (so UI can just ask "make a poster of …")
+  if (wantsImage(question)) {
+    try {
+      const img = await handleImageIntent(req, question, options);
+      return send(res, 200, headers, img);
+    } catch (e) {
+      const fallback = humanPrefix('image') +
+        'I tried to create an image but hit a hiccup. Try again with a short, specific prompt?';
+      return send(res, 200, headers, { answer: fallback, provider: 'image-fallback' });
+    }
+  }
+
+  // Text route
+  const sys = buildSystemPrompt(chatId);
+  const messages = [
+    { role: 'system', content: sys },
+    { role: 'user',   content: question }
+  ];
+  const models = {
+    groq:      process.env.GROQ_MODEL      || 'llama-3.1-70b-versatile',
+    deepinfra: process.env.DEEPINFRA_MODEL || 'meta-llama/Meta-Llama-3.1-70B-Instruct',
+    gemini:    process.env.GEMINI_MODEL    || 'gemini-1.5-pro'
+  };
+  const gen = {
+    max_tokens: +(process.env.AI_MAX_TOKENS || 1024),
+    temperature: +(process.env.AI_TEMPERATURE || 0.3),
+    timeoutMs: +(process.env.AI_REQUEST_TIMEOUT_MS || 30000)
+  };
+
+  let lastErr = null;
+  const order = getOrder();
+  if (order.length === 0) {
+    return send(res, 502, headers, { error: 'No provider API keys configured.' });
+  }
+
+  for (const p of order) {
+    try {
+      const out = await callLLM(p, models[p], messages, gen);
+      const text = polishAnswer(out.text);
+      return send(res, 200, headers, {
+        answer: text, provider: p, model: models[p],
+        finish_reason: out.finish_reason, usage: out.usage
+      });
+    } catch (e) {
+      lastErr = e;
+      // continue to next provider
+    }
+  }
+
+  const sorry = humanPrefix() + 'I’m having trouble reaching my AI providers. Please try again shortly.';
+  return send(res, 200, headers, { answer: sorry, provider: 'none', error: lastErr?.message || 'all providers failed' });
+};
