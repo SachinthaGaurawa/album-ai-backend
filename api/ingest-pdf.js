@@ -1,102 +1,136 @@
-// /api/ingest-pdf.js – Handles PDF upload/URL ingestion into the knowledge base
-const pdfParse = require('pdf-parse');
-const { pool, deleteDocument } = require('../db');
-import { createDeepInfra } from '@ai-sdk/deepinfra';
-import { embed } from 'ai';
+// api/ingest-pdf.js  — Ingest a PDF by upload or URL, chunk + embed via DeepInfra REST, store in Postgres.
+// CommonJS, Node runtime.
 
-const deepinfraProvider = createDeepInfra({
-  apiKey: process.env.DEEPINFRA_API_KEY  // use API_KEY for consistency
-});
-const EMBED_MODEL_ID = 'BAAI/bge-large-en-v1.5';
+export const config = { runtime: "nodejs18.x" };
 
-export default async function handler(req, res) {
-  if (req.method !== 'POST') {
-    res.status(405).send('Method Not Allowed');
-    return;
+const pdfParse = require("pdf-parse");
+const { pool } = require("../db");
+
+/* ---------- CORS ---------- */
+function corsHeaders(origin) {
+  const allowed = (process.env.CORS_ORIGINS || "")
+    .split(",").map(s => s.trim().replace(/\/+$/, "")).filter(Boolean);
+  const o = (origin || "").replace(/\/+$/, "");
+  const ok = !origin || allowed.length === 0 || allowed.includes(o);
+  return {
+    ...(ok ? { "Access-Control-Allow-Origin": origin || "*" } : {}),
+    "Access-Control-Allow-Methods": "POST, OPTIONS",
+    "Access-Control-Allow-Headers": "Content-Type, Authorization",
+    "Cache-Control": "no-store",
+    "Content-Type": "application/json; charset=utf-8"
+  };
+}
+function send(res, status, headers, obj) {
+  res.writeHead(status, headers); res.end(JSON.stringify(obj));
+}
+
+/* ---------- DeepInfra Embeddings (REST) ---------- */
+const EMBED_MODEL = "BAAI/bge-large-en-v1.5"; // 1024 dims
+async function embedText(text, signal) {
+  const key = process.env.DEEPINFRA_API_KEY;
+  if (!key) throw new Error("DEEPINFRA_API_KEY not set");
+  const url = "https://api.deepinfra.com/v1/inference/" + encodeURIComponent(EMBED_MODEL);
+
+  const r = await fetch(url, {
+    method: "POST",
+    signal,
+    headers: { "Authorization": `Bearer ${key}`, "Content-Type": "application/json" },
+    body: JSON.stringify({ input: [text] }) // DeepInfra embedding APIs accept arrays on many models
+  });
+
+  const j = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(j?.error || `DeepInfra embed HTTP ${r.status}`);
+  // Normalize: expect nested arrays -> take first vector
+  const vec = j?.data?.[0]?.embedding || j?.embeddings?.[0] || j?.output?.[0];
+  if (!Array.isArray(vec)) throw new Error("Embedding not returned");
+  return vec;
+}
+
+/* ---------- Helpers ---------- */
+const CHUNK_SIZE = 1000; // ~750–800 tokens on average with English prose
+function splitIntoChunks(raw) {
+  const paras = String(raw || "").split(/\n\s*\n/).map(s => s.trim()).filter(Boolean);
+  const out = [];
+  for (const p of paras) {
+    if (p.length <= CHUNK_SIZE) out.push(p);
+    else {
+      for (let i = 0; i < p.length; i += CHUNK_SIZE) out.push(p.slice(i, i + CHUNK_SIZE));
+    }
   }
+  return out;
+}
+
+/* ---------- Handler ---------- */
+module.exports = async (req, res) => {
+  const headers = corsHeaders(req.headers.origin || req.headers.Origin);
+  if (req.method === "OPTIONS") return send(res, 204, headers, null);
+  if (req.method !== "POST")    return send(res, 405, headers, { error: "Only POST allowed" });
+
   try {
-    const userId = req.query.userId || req.body?.userId || (req.headers['x-user-id'] || null);
-    let pdfBuffer = null;
-    let filename = null;
-    if (req.headers['content-type']?.includes('application/pdf')) {
-      // PDF binary data directly in request
+    const userId =
+      req.query.userId || req.headers["x-user-id"] || (req.body && req.body.userId) || null;
+
+    // 1) Read PDF (three modes: raw upload, base64 body, url)
+    let pdfBuffer = null, filename = null;
+
+    if ((req.headers["content-type"] || "").includes("application/pdf")) {
       const chunks = [];
-      for await (const chunk of req) { chunks.push(chunk); }
+      for await (const ch of req) chunks.push(ch);
       pdfBuffer = Buffer.concat(chunks);
-      if (req.query.filename) {
-        filename = req.query.filename;
-      }
-    } else if (req.body?.file) {
-      // If PDF is base64-encoded in JSON
-      const data = req.body.file;
-      pdfBuffer = Buffer.from(data, 'base64');
-      filename = req.body.filename || 'document.pdf';
-    } else if (req.body?.url || req.query.url) {
-      // Fetch PDF from URL
-      const pdfUrl = req.body.url || req.query.url;
-      const fetchRes = await fetch(pdfUrl);
-      if (!fetchRes.ok) throw new Error("Failed to fetch PDF from URL");
-      pdfBuffer = Buffer.from(await fetchRes.arrayBuffer());
-      filename = pdfUrl.split('/').pop() || 'document.pdf';
+      filename = req.query.filename || "document.pdf";
     } else {
-      res.status(400).json({ error: "No PDF file or URL provided." });
-      return;
+      // Body may be JSON (read safely)
+      let json = {};
+      try {
+        const chunks = []; for await (const ch of req) chunks.push(ch);
+        json = JSON.parse(Buffer.concat(chunks).toString("utf8") || "{}");
+      } catch { json = {}; }
+
+      if (json.file) {
+        pdfBuffer = Buffer.from(json.file, "base64");
+        filename = json.filename || "document.pdf";
+      } else if (json.url || req.query.url) {
+        const pdfUrl = json.url || req.query.url;
+        const fr = await fetch(pdfUrl);
+        if (!fr.ok) throw new Error(`Failed to fetch PDF: ${fr.status}`);
+        pdfBuffer = Buffer.from(await fr.arrayBuffer());
+        filename = (pdfUrl.split("/").pop() || "document.pdf").split("?")[0];
+      }
     }
 
-    // Extract text from PDF
+    if (!pdfBuffer) return send(res, 400, headers, { error: "No PDF file or URL provided." });
+
+    // 2) Extract text
     const data = await pdfParse(pdfBuffer);
-    let text = data.text.trim();
-    if (!text) {
-      res.status(400).json({ error: "PDF contains no extractable text." });
-      return;
-    }
-    if (text.length > 1000000) {
-      text = text.slice(0, 1000000);  // truncate extremely large text for now
-    }
+    let text = (data.text || "").trim();
+    if (!text) return send(res, 400, headers, { error: "PDF contains no extractable text." });
+    if (text.length > 1_000_000) text = text.slice(0, 1_000_000);
 
-    // Insert a new document record
-    const docName = filename ? filename.replace(/\.pdf$/i, '') : `Document_${Date.now()}`;
-    const docInsertRes = await pool.query(
-      `INSERT INTO documents(user_id, name) VALUES($1, $2) RETURNING id`, 
+    // 3) Insert document row
+    const docName = filename ? filename.replace(/\.pdf$/i, "") : `Document_${Date.now()}`;
+    const ins = await pool.query(
+      `INSERT INTO documents(user_id, name) VALUES($1,$2) RETURNING id`,
       [userId, docName]
     );
-    const docId = docInsertRes.rows[0].id;
+    const docId = ins.rows[0].id;
 
-    // Split text into chunks for embedding
-    const CHUNK_SIZE = 1000;
-    const chunks = [];
-    const paragraphs = text.split(/\n\s*\n/);
-    for (let para of paragraphs) {
-      para = para.trim();
-      if (!para) continue;
-      if (para.length <= CHUNK_SIZE) {
-        chunks.push(para);
-      } else {
-        // further split large paragraphs
-        for (let i = 0; i < para.length; i += CHUNK_SIZE) {
-          const subText = para.slice(i, i + CHUNK_SIZE);
-          chunks.push(subText);
-        }
-      }
-    }
-
-    // Embed each chunk and store in DB
-    for (const chunkText of chunks) {
-      const embedRes = await embed({
-        model: deepinfraProvider.textEmbedding(EMBED_MODEL_ID),
-        value: chunkText
-      });
-      const vector = embedRes.embedding;
-      const vectorStr = '[' + vector.join(',') + ']';
+    // 4) Chunk + embed + store
+    const chunks = splitIntoChunks(text);
+    for (const chunk of chunks) {
+      // Avoid embedding empty or super short lines
+      if (!chunk || chunk.length < 20) continue;
+      const vec = await embedText(chunk);
+      const vecStr = "[" + vec.join(",") + "]";
       await pool.query(
-        `INSERT INTO document_chunks(doc_id, user_id, content, embeddings) VALUES($1, $2, $3, $4::vector)`,
-        [docId, userId, chunkText, vectorStr]
+        `INSERT INTO document_chunks(doc_id, user_id, content, embeddings)
+         VALUES($1,$2,$3,$4::vector)`,
+        [docId, userId, chunk, vecStr]
       );
     }
 
-    res.status(200).json({ message: "Document ingested successfully.", documentId: docId });
+    return send(res, 200, headers, { ok: true, documentId: docId, chunks: chunks.length, name: docName });
   } catch (err) {
-    console.error("Error ingesting PDF:", err);
-    res.status(500).json({ error: "Failed to ingest PDF: " + err.message });
+    const msg = err?.message || "Server error";
+    return send(res, 500, headers, { error: msg });
   }
-}
+};
