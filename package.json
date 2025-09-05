@@ -13,24 +13,22 @@
     "build": "echo \"No build step for serverless functions\""
   },
   "dependencies": {
+    "@ai-sdk/deepinfra": "^0.1.0",           // (ensure this dependency exists for DeepInfra provider)
+    "ai": "latest",                          // (the Vercel AI utilities for generateText, embed)
     "axios": "^1.7.4",
     "form-data": "^4.0.0",
     "node-fetch": "^3.3.2",
     "pdf-parse": "^1.1.1",
-
     "@google/generative-ai": "^0.11.4",
     "groq-sdk": "^0.5.0",
-
     "@upstash/redis": "^1.31.3",
     "@neondatabase/serverless": "^0.10.3",
     "pg": "^8.11.5",
-
+    "pg-vector": "^0.1.0",                   // (if needed to ensure vector type support, or included via extension)
     "lancedb": "^0.8.0",
     "uuid": "^9.0.1",
-
     "zod": "^3.23.8",
     "lru-cache": "^10.2.2",
-
     "vercel": "^33.7.0"
   },
   "devDependencies": {}
