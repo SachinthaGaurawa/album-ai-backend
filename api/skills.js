@@ -129,4 +129,4 @@ function buildSkillPrompt({ question, ctx, topic, owner, skill }) {
   return skill.build({ question, ctx, topic, owner });
 }
 
-module.exports = { matchSkill, buildSkillPrompt, detectCommand, SKILL_META };
+export { matchSkill, buildSkillPrompt, detectCommand, SKILL_META };

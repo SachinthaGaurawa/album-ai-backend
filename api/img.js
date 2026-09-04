@@ -220,7 +220,7 @@ async function generateWithDeepinfra(opts) {
 
 /* --------------------------------- MAIN ---------------------------------- */
 
-module.exports = async (req, res) => {
+export default async function handler(req, res) {
   if (req.method !== "GET" && req.method !== "POST") {
     return errJson(res, "Method not allowed", 405);
   }
@@ -331,4 +331,4 @@ module.exports = async (req, res) => {
     const msg = (err && err.message) ? err.message : "Unknown error";
     return errJson(res, "Image generation failed: " + msg, 500);
   }
-};
+}
