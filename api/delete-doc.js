@@ -1,5 +1,5 @@
 // api/delete-doc.js — Admin-only: remove a document's chunks from storage/docs.json
-export const config = { runtime: "nodejs18.x" };
+export const config = { runtime: "nodejs" };
 
 import fs from "fs";
 import path from "path";

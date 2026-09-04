@@ -5,7 +5,7 @@
 'use strict';
 
 // Force Node runtime on Vercel (if supported in your project)
-export const config = { runtime: 'nodejs18.x' };
+export const config = { runtime: 'nodejs' };
 
 /* ─────────────── CORS ─────────────── */
 function allowedOrigins() {
