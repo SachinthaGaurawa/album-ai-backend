@@ -5,7 +5,7 @@
 'use strict';
 
 // Force Node runtime on Vercel (if supported in your project)
-module.exports.config = { runtime: 'nodejs18.x' };
+export const config = { runtime: 'nodejs18.x' };
 
 /* ─────────────── CORS ─────────────── */
 function allowedOrigins() {
@@ -96,8 +96,10 @@ function getOrder() {
 }
 
 /* ─────────────── Optional DB/RAG hooks (safe if missing) ─────────────── */
-let db = null; // expects ../db with: getRecentMessages, saveMessage, getRelevantDocs
-try { db = require('../db'); } catch { /* optional */ }
+// The database layer is optional: every call site already degrades when it is
+// absent, so a failed import must not take the endpoint down.
+let db = null;
+try { db = (await import('../db.js')).default; } catch { /* optional */ }
 
 async function tryRagContext({ question, userId }) {
   // If you don't have @ai-sdk/deepinfra or a vector pipeline, this returns '' and is skipped.
@@ -216,7 +218,7 @@ async function dispatch(provider, model, messages, opts){
 }
 
 /* ─────────────── Handler ─────────────── */
-module.exports = async (req, res) => {
+export default async function handler(req, res) {
   const headers = corsHeaders(req.headers.origin || req.headers.Origin);
 
   if (req.method === 'OPTIONS') return send(res, 204, headers, null);
@@ -334,4 +336,4 @@ module.exports = async (req, res) => {
 
   const sorry = humanPrefix() + 'I’m having trouble reaching my AI providers. Please try again shortly.';
   return send(res, 200, headers, { answer: sorry, provider: 'none', error: lastErr?.message || 'all providers failed' });
-};
+}

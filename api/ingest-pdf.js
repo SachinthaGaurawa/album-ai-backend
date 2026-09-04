@@ -9,15 +9,22 @@ export const config = {
   },
 };
 
-const pdfParse = require("pdf-parse");
-const { Pool } = require("pg");
+import pdfParse from "pdf-parse";
+import pkg from "pg";
+const { Pool } = pkg;
 
-// Re-use your existing db.js if you already have one.
-// Otherwise this Pool is safe to keep here.
-const pool = new Pool({
-  connectionString: process.env.DATABASE_URL,
-  ssl: { rejectUnauthorized: false },
-});
+// Built on first use so a missing DATABASE_URL cannot take the module down
+// at import time.
+let _pool = null;
+function pool() {
+  if (!_pool) {
+    _pool = new Pool({
+      connectionString: process.env.DATABASE_URL,
+      ssl: { rejectUnauthorized: false },
+    });
+  }
+  return _pool;
+}
 
 /* ---------------- CORS ---------------- */
 function corsHeaders(origin) {
@@ -129,7 +136,7 @@ export default async function handler(req, res) {
 
     // 3) Insert the document
     const docName = filename.replace(/\.pdf$/i, "");
-    const ins = await pool.query(
+    const ins = await pool().query(
       `INSERT INTO documents(user_id, name, created_at) VALUES ($1,$2,NOW()) RETURNING id`,
       [userId, docName]
     );
@@ -143,7 +150,7 @@ export default async function handler(req, res) {
       if (!chunk || chunk.length < 20) continue;
       const vec = await embedText(chunk);
       const vecStr = "[" + vec.join(",") + "]";
-      await pool.query(
+      await pool().query(
         `INSERT INTO document_chunks(doc_id, user_id, content, embeddings)
          VALUES ($1,$2,$3,$4::vector)`,
         [docId, userId, chunk, vecStr]

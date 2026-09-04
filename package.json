@@ -2,34 +2,25 @@
   "name": "album-ai-backend",
   "private": true,
   "version": "1.0.0",
-  "description": "Vercel serverless backend for multi-provider AI chatbot (+RAG, memory, image gen).",
-  "type": "commonjs",
+  "description": "Vercel serverless backend for the portfolio album AI (Q&A, captions, RAG).",
+  "type": "module",
   "engines": {
-    "node": "18.x"
+    "node": ">=18"
   },
   "scripts": {
     "dev": "vercel dev",
     "start": "vercel dev",
-    "build": "echo \"No build step for serverless functions\""
+    "build": "echo \"No build step for serverless functions\"",
+    "check": "node --check api/ai.js && node --check api/ai-expert.js && node --check api/ask.js && node --check api/delete-doc.js && node --check api/docs.json.js && node --check api/img.js && node --check api/ingest-pdf.js && node --check api/ping.js && node --check api/skills.js && node --check db.js"
   },
   "dependencies": {
-    "@ai-sdk/deepinfra": "^0.1.0",           // (ensure this dependency exists for DeepInfra provider)
-    "ai": "latest",                          // (the Vercel AI utilities for generateText, embed)
-    "axios": "^1.7.4",
-    "form-data": "^4.0.0",
-    "node-fetch": "^3.3.2",
+    "@ai-sdk/deepinfra": "^0.1.0",
+    "ai": "^4.0.0",
     "pdf-parse": "^1.1.1",
-    "@google/generative-ai": "^0.11.4",
-    "groq-sdk": "^0.5.0",
-    "@upstash/redis": "^1.31.3",
-    "@neondatabase/serverless": "^0.10.3",
     "pg": "^8.11.5",
-    "pg-vector": "^0.1.0",                   // (if needed to ensure vector type support, or included via extension)
-    "lancedb": "^0.8.0",
-    "uuid": "^9.0.1",
-    "zod": "^3.23.8",
-    "lru-cache": "^10.2.2",
-    "vercel": "^33.7.0"
+    "zod": "^3.23.8"
   },
-  "devDependencies": {}
+  "devDependencies": {
+    "vercel": "^33.7.0"
+  }
 }

@@ -1,22 +1,32 @@
 // /db.js – Database connection and helper functions
-const { Pool } = require('pg');
-const connectionString = process.env.DATABASE_URL || process.env.POSTGRES_URL;
-if (!connectionString) {
-  throw new Error("Database connection string not set in environment.");
-}
-const pool = new Pool({
-  connectionString,
-  // ssl: { rejectUnauthorized: false }, // use if needed for Neon
-});
+import pkg from 'pg';
+const { Pool } = pkg;
 
-// Ensure pgvector extension is enabled (vector similarity search)
-pool.query(`CREATE EXTENSION IF NOT EXISTS vector;`).catch(err => {
-  console.warn("pgvector extension enable failed (maybe already installed or insufficient permission):", err.message);
-});
+// The pool is built on first use, not on import. Throwing at module scope took
+// down every endpoint that merely imports this file whenever DATABASE_URL was
+// unset, including the ones that never touch the database.
+let _pool = null;
+let _extensionChecked = false;
+
+export function getPool() {
+  if (_pool) return _pool;
+  const connectionString = process.env.DATABASE_URL || process.env.POSTGRES_URL;
+  if (!connectionString) throw new Error('DATABASE_URL is not set');
+  _pool = new Pool({ connectionString });
+  if (!_extensionChecked) {
+    _extensionChecked = true;
+    // Vector similarity search needs the extension; a missing grant must not
+    // be fatal, so this stays a warning.
+    _pool.query('CREATE EXTENSION IF NOT EXISTS vector;').catch(err => {
+      console.warn('[db] pgvector extension not enabled:', err.message);
+    });
+  }
+  return _pool;
+}
 
 // Retrieve recent conversation messages for memory
 async function getRecentMessages(userId, limit = 10) {
-  const res = await pool.query(
+  const res = await getPool().query(
     `SELECT role, content
      FROM messages
      WHERE user_id = $1
@@ -30,7 +40,7 @@ async function getRecentMessages(userId, limit = 10) {
 
 // Save a message (user or assistant) into the conversation history
 async function saveMessage(userId, role, content) {
-  await pool.query(
+  await getPool().query(
     `INSERT INTO messages(user_id, role, content, timestamp) VALUES($1, $2, $3, NOW())`,
     [userId, role, content]
   );
@@ -41,7 +51,7 @@ async function listDocuments(userId) {
   if (!userId) {
     return [];
   }
-  const res = await pool.query(
+  const res = await getPool().query(
     `SELECT id, name, created_at
      FROM documents
      WHERE user_id = $1
@@ -53,8 +63,8 @@ async function listDocuments(userId) {
 
 // Delete a document and its chunks (called by delete-doc.js)
 async function deleteDocument(docId, userId) {
-  await pool.query(`DELETE FROM document_chunks WHERE doc_id = $1 AND user_id = $2`, [docId, userId]);
-  await pool.query(`DELETE FROM documents WHERE id = $1 AND user_id = $2`, [docId, userId]);
+  await getPool().query(`DELETE FROM document_chunks WHERE doc_id = $1 AND user_id = $2`, [docId, userId]);
+  await getPool().query(`DELETE FROM documents WHERE id = $1 AND user_id = $2`, [docId, userId]);
 }
 
 // Semantic search for relevant document chunks given a query embedding
@@ -80,12 +90,20 @@ async function getRelevantDocs(userId, embedding, topK = 3) {
     `;
     params = [embeddingStr, topK];
   }
-  const res = await pool.query(query, params);
+  const res = await getPool().query(query, params);
   return res.rows.map(r => r.content);
 }
 
-module.exports = {
-  pool,
+export {
+  getRecentMessages,
+  saveMessage,
+  listDocuments,
+  deleteDocument,
+  getRelevantDocs
+};
+
+export default {
+  getPool,
   getRecentMessages,
   saveMessage,
   listDocuments,
