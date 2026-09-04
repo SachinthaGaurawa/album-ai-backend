@@ -10,7 +10,6 @@
   "scripts": {
     "dev": "vercel dev",
     "start": "vercel dev",
-    "build": "echo \"No build step for serverless functions\"",
     "check": "node --check api/ai.js && node --check api/ai-expert.js && node --check api/ask.js && node --check api/delete-doc.js && node --check api/docs.json.js && node --check api/img.js && node --check api/ingest-pdf.js && node --check api/ping.js && node --check api/skills.js && node --check db.js"
   },
   "dependencies": {
