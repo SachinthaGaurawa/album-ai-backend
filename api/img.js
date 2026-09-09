@@ -225,6 +225,16 @@ export default async function handler(req, res) {
     return errJson(res, "Method not allowed", 405);
   }
 
+  /* Left open, this endpoint spends the owner's own paid DeepInfra/FAL
+     credits generating whatever any visitor asks for, with no content
+     filtering at all - a direct cost and reputation risk with no
+     legitimate public use case on a single-owner portfolio site. Only the
+     owner may call it; see AI_RULES.md. */
+  const authToken = (req.headers.authorization || "").replace(/^Bearer\s+/i, "").trim();
+  if (!process.env.ADMIN_TOKEN || authToken !== process.env.ADMIN_TOKEN) {
+    return errJson(res, "Unauthorized", 401);
+  }
+
   try {
     const q = await readBody(req);
 
