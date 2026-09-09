@@ -19,6 +19,72 @@ function corsHeaders(origin) {
   return { 'Cache-Control': 'no-store' };
 }
 
+/* Model names rot. This file has been broken twice by it already: Groq
+   decommissioned llama-3.1-70b-versatile, and Gemini returns 404 for
+   gemini-1.5-flash on v1beta - so every question fell through all three
+   providers to "all providers failed", silently, because each error was
+   swallowed by an empty catch.
+
+   Each provider therefore has a list of candidates rather than one name. The
+   first that answers is remembered for the life of the instance, so a
+   retired name costs one failed call rather than one per request, and any of
+   them can be overridden with an environment variable when the next name
+   changes - without a code deploy. */
+/* The gallery appends "(Answer entirely in <Language>.)" when a visitor asks
+   in another language. The old prompt never mentioned language, so a model was
+   free to ignore it; now honouring it is part of the instruction. */
+const SYSTEM_PROMPT =
+  'You are a concise technical assistant for a portfolio site. ' +
+  'Use only the provided album context; if it does not contain the answer, say so briefly. ' +
+  'If the user asks for a particular language, write the entire answer in that language.';
+
+const MODELS = {
+  groq: (process.env.GROQ_MODEL ? [process.env.GROQ_MODEL] : []).concat([
+    'openai/gpt-oss-120b',
+    'llama-3.3-70b-versatile',
+    'llama-3.1-8b-instant',
+  ]),
+  deepinfra: (process.env.DEEPINFRA_MODEL ? [process.env.DEEPINFRA_MODEL] : []).concat([
+    'meta-llama/Meta-Llama-3.1-8B-Instruct',
+    'meta-llama/Meta-Llama-3.1-70B-Instruct',
+  ]),
+  gemini: (process.env.GEMINI_MODEL ? [process.env.GEMINI_MODEL] : []).concat([
+    'gemini-3.1-flash-lite',
+    'gemini-2.5-flash',
+    'gemini-flash-latest',
+  ]),
+};
+
+/* Remembered per warm instance: the candidate that last worked. */
+const working = { groq: null, deepinfra: null, gemini: null };
+
+function candidates(provider) {
+  const list = MODELS[provider];
+  const won = working[provider];
+  return won ? [won].concat(list.filter(m => m !== won)) : list;
+}
+
+/* Try each candidate in turn. A 404 or a "decommissioned" 400 means the name
+   is gone, so move on; anything else (a bad key, a rate limit) is the same for
+   every candidate and is reported straight away. */
+async function tryModels(provider, run) {
+  const errors = [];
+  for (const model of candidates(provider)) {
+    try {
+      const out = await run(model);
+      working[provider] = model;
+      return out;
+    } catch (err) {
+      const msg = String(err && err.message || err);
+      errors.push(`${model}: ${msg.slice(0, 180)}`);
+      if (!/\b404\b|decommission|not found|does not exist|unsupported model|model_not_found/i.test(msg)) {
+        throw new Error(errors.join(' | '));
+      }
+    }
+  }
+  throw new Error(errors.join(' | '));
+}
+
 function withTimeout(ms = 30000) {
   const ac = new AbortController();
   const t = setTimeout(() => ac.abort(), ms);
@@ -29,6 +95,7 @@ function withTimeout(ms = 30000) {
 async function askGroq({ question, context, signal }) {
   const key = process.env.GROQ_API_KEY;
   if (!key) throw new Error('GROQ_API_KEY not set');
+  return tryModels('groq', async (model) => {
   const r = await fetch('https://api.groq.com/openai/v1/chat/completions', {
     method: 'POST', signal,
     headers: {
@@ -36,14 +103,13 @@ async function askGroq({ question, context, signal }) {
       'Content-Type': 'application/json',
     },
     body: JSON.stringify({
-      model: 'llama-3.1-70b-versatile',
+      model,
       temperature: 0.2,
-      max_tokens: 400,
+      max_tokens: 900,
       messages: [
         {
           role: 'system',
-          content:
-            'You are a concise technical assistant for a portfolio site. Only use the provided album context. If unknown, say so briefly.',
+          content: SYSTEM_PROMPT,
         },
         {
           role: 'user',
@@ -52,14 +118,16 @@ async function askGroq({ question, context, signal }) {
       ],
     }),
   });
-  if (!r.ok) throw new Error(`Groq HTTP ${r.status}: ${await r.text().catch(() => '')}`);
+  if (!r.ok) throw new Error(`Groq HTTP ${r.status}: ${(await r.text().catch(() => '')).slice(0, 300)}`);
   const j = await r.json();
   return (j?.choices?.[0]?.message?.content || '').trim();
+  });
 }
 
 async function askDeepInfra({ question, context, signal }) {
   const key = process.env.DEEPINFRA_API_KEY;  // updated to use API_KEY for consistency
   if (!key) throw new Error('DEEPINFRA_API_KEY not set');
+  return tryModels('deepinfra', async (model) => {
   const r = await fetch('https://api.deepinfra.com/v1/openai/chat/completions', {
     method: 'POST', signal,
     headers: {
@@ -67,48 +135,59 @@ async function askDeepInfra({ question, context, signal }) {
       'Content-Type': 'application/json',
     },
     body: JSON.stringify({
-      model: 'meta-llama/Meta-Llama-3.1-8B-Instruct',
+      model,
       temperature: 0.2,
-      max_tokens: 400,
+      max_tokens: 900,
       messages: [
-        {
-          role: 'system',
-          content: 'You are a concise technical assistant for a portfolio site. Only use the provided album context.',
-        },
+        { role: 'system', content: SYSTEM_PROMPT },
         { role: 'user', content: `Album context:\n${context}\n\nQuestion: ${question}` },
       ],
     }),
   });
-  if (!r.ok) throw new Error(`DeepInfra HTTP ${r.status}: ${await r.text().catch(() => '')}`);
+  if (!r.ok) throw new Error(`DeepInfra HTTP ${r.status}: ${(await r.text().catch(() => '')).slice(0, 300)}`);
   const j = await r.json();
   return (j?.choices?.[0]?.message?.content || '').trim();
+  });
 }
 
 async function askGeminiText({ question, context, signal }) {
   const key = process.env.GEMINI_API_KEY;
   if (!key) throw new Error('GEMINI_API_KEY not set');
-  const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${encodeURIComponent(key)}`;
   const prompt =
-    'You are a concise technical assistant for a portfolio site. ' +
-    'Only use the provided album context. If unknown, say so briefly.\n\n' +
+    SYSTEM_PROMPT + '\n\n' +
     `Album context:\n${context}\n\nQuestion: ${question}\n` +
     'Answer in 2–6 sentences with concrete details if present.';
+  return tryModels('gemini', async (model) => {
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${encodeURIComponent(key)}`;
   const r = await fetch(url, {
     method: 'POST', signal,
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
       contents: [{ role: 'user', parts: [{ text: prompt }] }],
-      generationConfig: { temperature: 0.2, maxOutputTokens: 400 },
+      generationConfig: { temperature: 0.2, maxOutputTokens: 900 },
     }),
   });
-  if (!r.ok) throw new Error(`Gemini HTTP ${r.status}: ${await r.text().catch(() => '')}`);
+  if (!r.ok) throw new Error(`Gemini HTTP ${r.status}: ${(await r.text().catch(() => '')).slice(0, 300)}`);
   const j = await r.json();
   const text = (j?.candidates?.[0]?.content?.parts || []).map(p => p?.text || '').join('').trim();
   return text;
+  });
 }
 
 // Vision (image captioning) via Gemini
-function arrayBufferToBase64(ab) { /* ... unchanged ... */ }
+/* This was a comment where a function body should be, so it returned
+   undefined and every caption request sent Gemini `"data": undefined`.
+   Chunked because spreading a whole image into String.fromCharCode blows the
+   argument limit on anything but a thumbnail. */
+function arrayBufferToBase64(ab) {
+  const bytes = new Uint8Array(ab);
+  const CHUNK = 0x8000;
+  let binary = '';
+  for (let i = 0; i < bytes.length; i += CHUNK) {
+    binary += String.fromCharCode.apply(null, bytes.subarray(i, i + CHUNK));
+  }
+  return btoa(binary);
+}
 
 async function captionWithGemini({ imageUrl, signal }) {
   const key = process.env.GEMINI_API_KEY;
@@ -119,7 +198,8 @@ async function captionWithGemini({ imageUrl, signal }) {
   const mime = imgRes.headers.get('content-type') || 'image/jpeg';
   const bytes = await imgRes.arrayBuffer();
   const b64 = arrayBufferToBase64(bytes);
-  const endpoint = `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${encodeURIComponent(key)}`;
+  return tryModels('gemini', async (model) => {
+  const endpoint = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${encodeURIComponent(key)}`;
   // 1) Caption generation
   const capReq = await fetch(endpoint, {
     method: 'POST', signal,
@@ -154,6 +234,7 @@ async function captionWithGemini({ imageUrl, signal }) {
   const tagText = (tagJson?.candidates?.[0]?.content?.parts || []).map((p) => p?.text || '').join('').trim();
   const tags = tagText.split(',').map((s) => s.trim()).filter(Boolean).slice(0, 8);
   return { caption, tags };
+  });
 }
 
 export default async function handler(req) {
@@ -171,6 +252,7 @@ export default async function handler(req) {
     const hasGroq = !!process.env.GROQ_API_KEY;
     const hasGem = !!process.env.GEMINI_API_KEY;
     const hasDI = !!process.env.DEEPINFRA_API_KEY;
+    const failures = [];
     if (mode === 'ask') {
       if (!question || !context) {
         return new Response(JSON.stringify({ error: 'Missing question/context' }), { status: 400, headers });
@@ -185,8 +267,9 @@ export default async function handler(req) {
           const answer = await askGroq({ question, context, signal: t1.signal });
           t1.clear();
           return new Response(JSON.stringify({ answer, provider: 'groq' }), { headers });
-        } catch {
+        } catch (err) {
           t1.clear();
+          failures.push(`groq: ${String(err && err.message || err).slice(0, 300)}`);
         }
       }
       if (hasDI) {
@@ -195,8 +278,9 @@ export default async function handler(req) {
           const answer = await askDeepInfra({ question, context, signal: t2.signal });
           t2.clear();
           return new Response(JSON.stringify({ answer, provider: 'deepinfra' }), { headers });
-        } catch {
+        } catch (err) {
           t2.clear();
+          failures.push(`deepinfra: ${String(err && err.message || err).slice(0, 300)}`);
         }
       }
       if (hasGem) {
@@ -205,14 +289,19 @@ export default async function handler(req) {
           const answer = await askGeminiText({ question, context, signal: t3.signal });
           t3.clear();
           return new Response(JSON.stringify({ answer, provider: 'gemini' }), { headers });
-        } catch {
+        } catch (err) {
           t3.clear();
+          failures.push(`gemini: ${String(err && err.message || err).slice(0, 300)}`);
         }
       }
-      return new Response(JSON.stringify({ error: 'No provider available or all providers failed.' }), {
-        status: 502,
-        headers,
-      });
+      return new Response(JSON.stringify({
+        error: 'No provider available or all providers failed.',
+        // Which provider failed and why. Keys are never echoed - only the
+        // upstream status and message - and without this the last outage was
+        // invisible for months.
+        failures,
+        tried: { groq: hasGroq, deepinfra: hasDI, gemini: hasGem },
+      }), { status: 502, headers });
     }
     if (mode === 'caption') {
       if (!imageUrl) {
