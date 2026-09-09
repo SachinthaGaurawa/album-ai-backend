@@ -89,6 +89,17 @@ export default async function handler(req, res) {
   if (req.method === "OPTIONS") return send(res, 204, headers, null);
   if (req.method !== "POST")    return send(res, 405, headers, { error: "Only POST allowed" });
 
+  /* This writes straight into the same document_chunks table the AI reads
+     back as "context" for answering visitor questions. Left open, anyone
+     who found this URL could ingest a fabricated PDF - a fake report making
+     false claims - and have it retrieved and presented as documented fact
+     to some other, innocent visitor. Only the owner may add to the
+     knowledge base; see AI_RULES.md. */
+  const token = (req.headers.authorization || "").replace(/^Bearer\s+/i, "").trim();
+  if (!process.env.ADMIN_TOKEN || token !== process.env.ADMIN_TOKEN) {
+    return send(res, 401, headers, { error: "Unauthorized" });
+  }
+
   try {
     const userId =
       req.query.userId || req.headers["x-user-id"] || null;
