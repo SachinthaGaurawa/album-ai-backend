@@ -379,7 +379,45 @@ export default async function handler(req) {
         }
       }
 
-      /* Every provider ignored the language. Returning the English answer
+      /* Every provider refused to ANSWER in the language - but translating a
+         paragraph is a much easier task than composing in it, and a model
+         that ignored "answer in Sinhala" will usually still do "translate
+         this into Sinhala". So before giving up, take the answer we already
+         have and ask for a translation of it, again trying each provider in
+         turn and checking the script. This is what makes the feature work
+         without depending on any one provider being configured. */
+      if (ignoredLanguage && langCode && SCRIPT_RANGES[langCode]) {
+        const translatePrompt =
+          `Translate the text below into ${langName}. ` +
+          `Output ONLY the translation, with no preamble, no notes, and no English. ` +
+          `Keep technical terms, product names and numbers as they are.\n\n` +
+          `---\n${ignoredLanguage.answer}\n---`;
+        for (const name of providerOrder(langCode)) {
+          if (!available[name]) continue;
+          const t = withTimeout(30000);
+          try {
+            const translated = await askFns[name]({
+              question: translatePrompt,
+              context: '(translation task - no album context needed)',
+              signal: t.signal,
+              langName,
+            });
+            t.clear();
+            if (translated && translated.trim() && honorsLanguage(translated, langCode)) {
+              return new Response(JSON.stringify({
+                answer: translated.trim(),
+                provider: `${ignoredLanguage.provider}+${name}:translate`,
+                langHonored: true,
+              }), { headers });
+            }
+          } catch (err) {
+            t.clear();
+            failures.push(`${name} (translate): ${String(err && err.message || err).slice(0, 200)}`);
+          }
+        }
+      }
+
+      /* Even translation failed everywhere. Returning the English answer
          with the flag set is better than returning nothing: the gallery
          shows it under an honest "translated answer unavailable" note
          instead of passing it off as the language that was asked for. */
