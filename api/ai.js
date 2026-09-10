@@ -119,8 +119,65 @@ function withTimeout(ms = 30000) {
   return { signal: ac.signal, clear: () => clearTimeout(t) };
 }
 
+/* ---------------------------------------------------------------------------
+   Answering in the language that was asked for.
+
+   Reported repeatedly and finally traced here: a question asked in Sinhala
+   kept coming back in English. The prompt did say "write the entire answer in
+   that language", and the model was reached - but the providers were tried in
+   a fixed order, Groq first, and whatever the first one returned was sent
+   back unchecked. Groq serves Llama models, which are weak at low-resource
+   languages like Sinhala and simply answer in English; Gemini handles them
+   well, but was third in line and never got asked.
+
+   So two things matter, and neither is a prompt tweak: ask the provider that
+   can actually do the language FIRST, and verify the reply before returning
+   it. A language with its own script makes that verifiable - the script is
+   either in the reply or it isn't. If a provider ignores the request, it is
+   treated exactly like a provider that errored: move on to the next one. */
+const SCRIPT_RANGES = {
+  si: /[඀-෿]/,           // Sinhala
+  ta: /[஀-௿]/,           // Tamil
+  hi: /[ऀ-ॿ]/,           // Devanagari (Hindi)
+  ar: /[؀-ۿ]/,           // Arabic
+  ru: /[Ѐ-ӿ]/,           // Cyrillic
+  ko: /[가-힯]/,           // Hangul
+  ja: /[぀-ヿ]/,           // Kana
+  zh: /[一-鿿]/,           // Han
+};
+
+/* True when the reply is in the language that was asked for, as far as it can
+   be checked. Latin-script languages (French, Spanish, ...) have no unique
+   marker, so they are taken at the model's word rather than guessed at. */
+function honorsLanguage(text, langCode) {
+  if (!langCode || langCode === 'en') return true;
+  const re = SCRIPT_RANGES[langCode];
+  if (!re) return true;
+  return re.test(String(text || ''));
+}
+
+/* Gemini is markedly better than the Llama-based providers at the languages
+   this site is actually asked in, so when one is requested it goes first.
+   English keeps the original order, which is cheaper and faster. */
+function providerOrder(langCode) {
+  return (langCode && langCode !== 'en')
+    ? ['gemini', 'deepinfra', 'groq']
+    : ['groq', 'deepinfra', 'gemini'];
+}
+
+/* Repeated at the top and the bottom of the user turn: models follow a
+   constraint far more reliably when it brackets the request instead of
+   trailing it once. */
+function languageDirective(langName) {
+  if (!langName) return '';
+  return `IMPORTANT: Write your ENTIRE answer in ${langName}. ` +
+         `Every sentence must be in ${langName}. Do not answer in English. ` +
+         `Technical terms and proper nouns may stay in their original form, ` +
+         `but all prose around them must be ${langName}.`;
+}
+
 // Providers for Q&A (text)
-async function askGroq({ question, context, signal }) {
+async function askGroq({ question, context, signal, langName }) {
   const key = process.env.GROQ_API_KEY;
   if (!key) throw new Error('GROQ_API_KEY not set');
   return tryModels('groq', async (model) => {
@@ -141,7 +198,7 @@ async function askGroq({ question, context, signal }) {
         },
         {
           role: 'user',
-          content: `Album context:\n${context}\n\nQuestion: ${question}\nAnswer in 2–6 sentences with concrete details if present.`,
+          content: `${languageDirective(langName)}\n\nAlbum context:\n${context}\n\nQuestion: ${question}\nAnswer in 2–6 sentences with concrete details if present.\n${languageDirective(langName)}`,
         },
       ],
     }),
@@ -152,7 +209,7 @@ async function askGroq({ question, context, signal }) {
   });
 }
 
-async function askDeepInfra({ question, context, signal }) {
+async function askDeepInfra({ question, context, signal, langName }) {
   const key = process.env.DEEPINFRA_API_KEY;  // updated to use API_KEY for consistency
   if (!key) throw new Error('DEEPINFRA_API_KEY not set');
   return tryModels('deepinfra', async (model) => {
@@ -168,7 +225,7 @@ async function askDeepInfra({ question, context, signal }) {
       max_tokens: 900,
       messages: [
         { role: 'system', content: SYSTEM_PROMPT },
-        { role: 'user', content: `Album context:\n${context}\n\nQuestion: ${question}` },
+        { role: 'user', content: `${languageDirective(langName)}\n\nAlbum context:\n${context}\n\nQuestion: ${question}\n${languageDirective(langName)}` },
       ],
     }),
   });
@@ -178,13 +235,14 @@ async function askDeepInfra({ question, context, signal }) {
   });
 }
 
-async function askGeminiText({ question, context, signal }) {
+async function askGeminiText({ question, context, signal, langName }) {
   const key = process.env.GEMINI_API_KEY;
   if (!key) throw new Error('GEMINI_API_KEY not set');
   const prompt =
-    SYSTEM_PROMPT + '\n\n' +
+    SYSTEM_PROMPT + '\n\n' + languageDirective(langName) + '\n\n' +
     `Album context:\n${context}\n\nQuestion: ${question}\n` +
-    'Answer in 2–6 sentences with concrete details if present.';
+    'Answer in 2–6 sentences with concrete details if present.\n' +
+    languageDirective(langName);
   return tryModels('gemini', async (model) => {
   const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${encodeURIComponent(key)}`;
   const r = await fetch(url, {
@@ -276,7 +334,7 @@ export default async function handler(req) {
   }
 
   try {
-    const { mode, question, context, imageUrl } = (await req.json().catch(() => ({}))) || {};
+    const { mode, question, context, imageUrl, lang } = (await req.json().catch(() => ({}))) || {};
     const hasGroq = !!process.env.GROQ_API_KEY;
     const hasGem = !!process.env.GEMINI_API_KEY;
     const hasDI = !!process.env.DEEPINFRA_API_KEY;
@@ -288,40 +346,52 @@ export default async function handler(req) {
       if (String(question).length > 2000) {
         return new Response(JSON.stringify({ error: 'Question too long' }), { status: 413, headers });
       }
-      // Try Groq → DeepInfra → Gemini for answer
-      if (hasGroq) {
-        const t1 = withTimeout(30000);
+      /* Providers are tried in the order that can actually satisfy this
+         request - Gemini first when a language with its own script was asked
+         for - and each reply is checked before it is returned. A provider
+         that answers in the wrong language is skipped exactly like one that
+         errored, so the next provider gets its turn instead of the visitor
+         getting English they did not ask for. */
+      const askFns = { groq: askGroq, deepinfra: askDeepInfra, gemini: askGeminiText };
+      const available = { groq: hasGroq, deepinfra: hasDI, gemini: hasGem };
+      const langCode = (lang && lang.code) || '';
+      const langName = (lang && lang.name) || '';
+      let ignoredLanguage = null;   // best answer that came back in the wrong language
+
+      for (const name of providerOrder(langCode)) {
+        if (!available[name]) continue;
+        const t = withTimeout(30000);
         try {
-          const answer = await askGroq({ question, context, signal: t1.signal });
-          t1.clear();
-          return new Response(JSON.stringify({ answer, provider: 'groq' }), { headers });
+          const answer = await askFns[name]({ question, context, signal: t.signal, langName });
+          t.clear();
+          if (answer && answer.trim()) {
+            if (honorsLanguage(answer, langCode)) {
+              return new Response(JSON.stringify({ answer, provider: name, langHonored: true }), { headers });
+            }
+            /* Right answer, wrong language. Hold on to it in case every
+               provider does the same, then try the next one. */
+            if (!ignoredLanguage) ignoredLanguage = { answer, provider: name };
+            failures.push(`${name}: answered, but not in ${langName || langCode}`);
+          }
         } catch (err) {
-          t1.clear();
-          failures.push(`groq: ${String(err && err.message || err).slice(0, 300)}`);
+          t.clear();
+          failures.push(`${name}: ${String(err && err.message || err).slice(0, 300)}`);
         }
       }
-      if (hasDI) {
-        const t2 = withTimeout(30000);
-        try {
-          const answer = await askDeepInfra({ question, context, signal: t2.signal });
-          t2.clear();
-          return new Response(JSON.stringify({ answer, provider: 'deepinfra' }), { headers });
-        } catch (err) {
-          t2.clear();
-          failures.push(`deepinfra: ${String(err && err.message || err).slice(0, 300)}`);
-        }
+
+      /* Every provider ignored the language. Returning the English answer
+         with the flag set is better than returning nothing: the gallery
+         shows it under an honest "translated answer unavailable" note
+         instead of passing it off as the language that was asked for. */
+      if (ignoredLanguage) {
+        return new Response(JSON.stringify({
+          answer: ignoredLanguage.answer,
+          provider: ignoredLanguage.provider,
+          langHonored: false,
+          requestedLang: langCode || null,
+        }), { headers });
       }
-      if (hasGem) {
-        const t3 = withTimeout(30000);
-        try {
-          const answer = await askGeminiText({ question, context, signal: t3.signal });
-          t3.clear();
-          return new Response(JSON.stringify({ answer, provider: 'gemini' }), { headers });
-        } catch (err) {
-          t3.clear();
-          failures.push(`gemini: ${String(err && err.message || err).slice(0, 300)}`);
-        }
-      }
+
       return new Response(JSON.stringify({
         error: 'No provider available or all providers failed.',
         // Which provider failed and why. Keys are never echoed - only the
