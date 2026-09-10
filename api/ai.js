@@ -443,6 +443,10 @@ export default async function handler(req) {
         }), { headers });
       }
 
+      // This is the only place any of this is ever recorded - none of it was
+      // logged server-side before, so a total outage like this one showed up
+      // only as a 502 with no visible cause anywhere in Vercel's own logs.
+      console.error('[ai] no provider answered:', JSON.stringify({ tried: { groq: hasGroq, deepinfra: hasDI, gemini: hasGem }, failures }));
       return new Response(JSON.stringify({
         error: 'No provider available or all providers failed.',
         // Which provider failed and why. Keys are never echoed - only the
@@ -473,6 +477,7 @@ export default async function handler(req) {
     return new Response(JSON.stringify({ error: 'Invalid mode. Use "ask" or "caption".' }), { status: 400, headers });
   } catch (err) {
     const msg = err?.name === 'AbortError' ? 'Upstream request timed out' : err?.message || 'Server error';
+    console.error('[ai] unhandled error:', err && err.stack || msg);
     return new Response(JSON.stringify({ error: msg }), { status: 500, headers });
   }
 }
