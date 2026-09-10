@@ -6,9 +6,22 @@ const ALLOWED_ORIGINS = (process.env.CORS_ORIGINS || '')
   .map(s => s.trim().replace(/\/+$/, ''))
   .filter(Boolean);
 
+/* CORS_ORIGINS is a Vercel dashboard setting, not something a code review can
+   verify - and the portfolio's own domain has already moved once (github.io
+   -> vercel.app, gallery.html now redirects the old one to the new). If that
+   env var is ever unset, stale, or just doesn't list whichever domain the
+   redirect lands on, every cross-origin call from the real site silently
+   stops working: the browser still sends the CORS preflight (so it shows up
+   in the logs as a normal 204), but then refuses to send the actual request
+   at all when the response carries no Access-Control-Allow-Origin - so
+   nothing server-side ever sees it, or errors, either. The portfolio's own
+   domains are public knowledge already, not a secret CORS is protecting, so
+   they're a permanent floor here independent of that env var. */
+const SITE_ORIGINS = ['https://sachinthagaurawa.vercel.app', 'https://sachinthagaurawa.github.io'];
+
 function corsHeaders(origin) {
   const o = (origin || '').replace(/\/+$/, '');
-  if (!origin || ALLOWED_ORIGINS.length === 0 || ALLOWED_ORIGINS.includes(o)) {
+  if (!origin || ALLOWED_ORIGINS.length === 0 || ALLOWED_ORIGINS.includes(o) || SITE_ORIGINS.includes(o)) {
     return {
       'Access-Control-Allow-Origin': origin || '*',
       'Access-Control-Allow-Headers': 'Content-Type, Authorization',

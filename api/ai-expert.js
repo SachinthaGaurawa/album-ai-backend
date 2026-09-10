@@ -14,10 +14,13 @@ function allowedOrigins() {
     .map(s => s.trim().replace(/\/+$/, ''))
     .filter(Boolean);
 }
+// See api/ai.js for why the portfolio's own domains are a permanent floor
+// here, independent of the CORS_ORIGINS env var.
+const SITE_ORIGINS = ['https://sachinthagaurawa.vercel.app', 'https://sachinthagaurawa.github.io'];
 function corsHeaders(origin) {
   const list = allowedOrigins();
   const o = (origin || '').replace(/\/+$/, '');
-  const ok = !origin || list.length === 0 || list.includes(o);
+  const ok = !origin || list.length === 0 || list.includes(o) || SITE_ORIGINS.includes(o);
   return {
     ...(ok ? { 'Access-Control-Allow-Origin': origin || '*' } : {}),
     'Access-Control-Allow-Headers': 'Content-Type, Authorization',
