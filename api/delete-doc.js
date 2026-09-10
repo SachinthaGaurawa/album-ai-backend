@@ -5,13 +5,16 @@ import fs from "fs";
 import path from "path";
 
 /* ── CORS (match your other endpoints) ─────────────────────── */
+// See api/ai.js for why the portfolio's own domains are a permanent floor
+// here, independent of the CORS_ORIGINS env var.
+const SITE_ORIGINS = ["https://sachinthagaurawa.vercel.app", "https://sachinthagaurawa.github.io"];
 function corsHeaders(origin) {
   const ALLOWED = (process.env.CORS_ORIGINS || "")
     .split(",")
     .map(s => s.trim().replace(/\/+$/, ""))
     .filter(Boolean);
   const o = (origin || "").replace(/\/+$/, "");
-  const allow = !origin || ALLOWED.length === 0 || ALLOWED.includes(o);
+  const allow = !origin || ALLOWED.length === 0 || ALLOWED.includes(o) || SITE_ORIGINS.includes(o);
   return {
     ...(allow ? { "Access-Control-Allow-Origin": origin || "*" } : {}),
     "Access-Control-Allow-Methods": "POST, OPTIONS",

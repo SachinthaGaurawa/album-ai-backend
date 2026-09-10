@@ -97,7 +97,11 @@ Not verifiable from source — confirm these in the Vercel project dashboard:
   without it, but a weak or guessable one defeats the point.
 - `CORS_ORIGINS` restricts to the real portfolio domain(s), not left empty
   (an empty list currently means "allow every origin" — see each endpoint's
-  `corsHeaders()`).
+  `corsHeaders()`). The portfolio's own domains (`sachinthagaurawa.vercel.app`,
+  `sachinthagaurawa.github.io`) are always allowed regardless of this
+  variable — see `SITE_ORIGINS` in each endpoint — so a stale or missing
+  value here can only make CORS_ORIGINS *more* permissive for other sites,
+  never lock the real portfolio out.
 - If any key (`GROQ_API_KEY`, `DEEPINFRA_API_KEY`, `GEMINI_API_KEY`,
   `FAL_KEY`, `ADMIN_TOKEN`, `DATABASE_URL`) is ever exposed — in a log, a
   screenshot, a commit — rotate it immediately; nothing in this codebase is

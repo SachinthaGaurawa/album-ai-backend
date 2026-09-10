@@ -27,11 +27,14 @@ function pool() {
 }
 
 /* ---------------- CORS ---------------- */
+// See api/ai.js for why the portfolio's own domains are a permanent floor
+// here, independent of the CORS_ORIGINS env var.
+const SITE_ORIGINS = ["https://sachinthagaurawa.vercel.app", "https://sachinthagaurawa.github.io"];
 function corsHeaders(origin) {
   const allowed = (process.env.CORS_ORIGINS || "")
     .split(",").map(s => s.trim().replace(/\/+$/, "")).filter(Boolean);
   const o = (origin || "").replace(/\/+$/, "");
-  const ok = !origin || allowed.length === 0 || allowed.includes(o);
+  const ok = !origin || allowed.length === 0 || allowed.includes(o) || SITE_ORIGINS.includes(o);
   return {
     ...(ok ? { "Access-Control-Allow-Origin": origin || "*" } : {}),
     "Access-Control-Allow-Methods": "POST, OPTIONS",
